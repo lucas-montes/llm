@@ -138,13 +138,17 @@ impl Tensor {
         }
     }
 
+    pub fn data(&self) -> &[f32] {
+        &self.data
+    }
+
     pub fn rand(rows: usize, cols: usize, seed: Option<u64>) -> Self {
         let mut rng = match seed {
             Some(s) => StdRng::seed_from_u64(s),
             None => StdRng::from_os_rng(),
         };
 
-        let mut data = Vec::with_capacity(rows * cols);
+        let mut data = vec![Default::default(); rows * cols];
         data.fill_with(|| rng.random());
 
         Self {
@@ -524,6 +528,13 @@ impl fmt::Debug for Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_new_tensor() {
+        println!("Tensor: {:?}", Tensor::new(0, 3));
+
+        println!("Tensor: {:?}", Tensor::new(3, 2));
+    }
 
     #[test]
     fn test_broadcast_wrong() {
