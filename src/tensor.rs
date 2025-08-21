@@ -78,25 +78,50 @@ pub struct Shape {
 }
 
 impl Shape {
+    fn size(&self) -> usize {
+        self.rows * self.cols
+    }
+
     fn broadcast(&self, other: &Shape) -> Result<Shape, TensorError> {
-        if self.rows == other.rows && self.cols == other.cols {
-            Ok(self.clone())
-        } else if self.rows == 1 && self.cols == other.cols {
-            Ok(Shape {
-                rows: other.rows,
-                cols: other.cols,
-            })
-        } else if self.cols == 1 && self.rows == other.rows {
-            Ok(Shape {
-                rows: other.rows,
-                cols: other.cols,
-            })
-        } else {
-            Err(TensorError::DimensionMismatch {
-                expected: (self.rows, self.cols),
-                found: (other.rows, other.cols),
-            })
-        }
+        // Treat shapes as 2D, but allow rows=0 or cols=0 to represent 1D or scalar tensors
+        let rows_a = self.rows;
+        let cols_a = self.cols;
+        let rows_b = other.rows;
+        let cols_b = other.cols;
+
+        // Compute broadcasted dimensions
+        let out_rows = match (rows_a, rows_b) {
+            (a, b) if a == b => a,
+            (1, b) => b,
+            (a, 1) => a,
+            (0, b) => b, // Treat 0 as 1 for broadcasting (e.g., empty tensor)
+            (a, 0) => a,
+            _ => {
+                return Err(TensorError::DimensionMismatch {
+                    expected: (rows_a, cols_a),
+                    found: (rows_b, cols_b),
+                });
+            }
+        };
+
+        let out_cols = match (cols_a, cols_b) {
+            (a, b) if a == b => a,
+            (1, b) => b,
+            (a, 1) => a,
+            (0, b) => b,
+            (a, 0) => a,
+            _ => {
+                return Err(TensorError::DimensionMismatch {
+                    expected: (rows_a, cols_a),
+                    found: (rows_b, cols_b),
+                });
+            }
+        };
+
+        Ok(Shape {
+            rows: out_rows,
+            cols: out_cols,
+        })
     }
 }
 
@@ -108,7 +133,7 @@ pub struct Tensor {
 impl Tensor {
     pub fn new(rows: usize, cols: usize) -> Self {
         Self {
-            data: Vec::with_capacity(rows * cols),
+            data: vec![Default::default(); rows * cols],
             shape: Shape { rows, cols },
         }
     }
@@ -134,7 +159,7 @@ impl Tensor {
             return Err(TensorError::IndexOutOfBounds {
                 row,
                 col,
-                shape:self.shape.clone(),
+                shape: self.shape.clone(),
             });
         }
         Ok(self.data[row * self.shape.cols + col])
@@ -219,6 +244,45 @@ impl Tensor {
         let data: Vec<_> = self.data.iter().map(|x| x.sqrt()).collect();
         Tensor::from(data)
     }
+
+    fn get_broadcasted(&self, row: usize, col: usize) -> f32 {
+        let actual_row = if self.shape.rows == 1 { 0 } else { row };
+        let actual_col = if self.shape.cols == 1 { 0 } else { col };
+        self.data[actual_row * self.shape.cols + actual_col]
+    }
+
+    fn broadcast<F: Fn(f32, f32) -> f32 + Clone + Copy>(
+        &self,
+        other: &Tensor,
+        op: F,
+    ) -> Result<Tensor, TensorError> {
+        let result_shape = self.shape.broadcast(&other.shape)?;
+        // let mut data = Vec::with_capacity(result_shape.size());
+
+        let data = (0..result_shape.rows)
+            .map(|i| {
+                (0..result_shape.cols).map(move |j| {
+                    let val1 = self.get_broadcasted(i, j);
+                    let val2 = other.get_broadcasted(i, j);
+                    op(val1, val2)
+                })
+            })
+            .flatten()
+            .collect();
+
+        // for i in 0..result_shape.rows {
+        //     for j in 0..result_shape.cols {
+        //         let val1 = self.get_broadcasted(i, j);
+        //         let val2 = other.get_broadcasted(i, j);
+        //         data.push(op(val1,val2));
+        //     }
+        // }
+
+        Ok(Tensor {
+            data,
+            shape: result_shape,
+        })
+    }
 }
 
 impl From<Shape> for Tensor {
@@ -226,8 +290,6 @@ impl From<Shape> for Tensor {
         Self::new(data.rows, data.cols)
     }
 }
-
-
 
 // From trait implementations
 impl From<Vec<f32>> for Tensor {
@@ -288,23 +350,21 @@ impl Add for &Tensor {
     type Output = Result<Tensor, TensorError>;
 
     fn add(self, other: &Tensor) -> Self::Output {
-        let data = if self.shape() == other.shape() {
-            self.data
+        if self.shape() == other.shape() {
+            let data = self
+                .data
                 .iter()
                 .zip(other.data.iter())
                 .map(|(a, b)| a + b)
-                .collect()
-        } else {
-            todo!()
-        };
+                .collect();
 
-        Ok(Tensor {
-            data,
-            shape: Shape {
-                rows: self.shape.rows,
-                cols: self.shape.cols,
-            },
-        })
+            Ok(Tensor {
+                data,
+                shape: self.shape.clone(),
+            })
+        } else {
+            self.broadcast(other, |a, b| a + b)
+        }
     }
 }
 
@@ -313,20 +373,21 @@ impl Sub for &Tensor {
     type Output = Result<Tensor, TensorError>;
 
     fn sub(self, other: &Tensor) -> Self::Output {
-        let data = self
-            .data
-            .iter()
-            .zip(other.data.iter())
-            .map(|(a, b)| a - b)
-            .collect();
+        if self.shape() == other.shape() {
+            let data = self
+                .data
+                .iter()
+                .zip(other.data.iter())
+                .map(|(a, b)| a - b)
+                .collect();
 
-        Ok(Tensor {
-            data,
-            shape: Shape {
-                rows: self.shape.rows,
-                cols: self.shape.cols,
-            },
-        })
+            Ok(Tensor {
+                data,
+                shape: self.shape.clone(),
+            })
+        } else {
+            self.broadcast(other, |a, b| a - b)
+        }
     }
 }
 
@@ -335,20 +396,21 @@ impl Mul for &Tensor {
     type Output = Result<Tensor, TensorError>;
 
     fn mul(self, other: &Tensor) -> Self::Output {
-        let data: Vec<f32> = self
-            .data
-            .iter()
-            .zip(other.data.iter())
-            .map(|(a, b)| a * b)
-            .collect();
+        if self.shape() == other.shape() {
+            let data = self
+                .data
+                .iter()
+                .zip(other.data.iter())
+                .map(|(a, b)| a * b)
+                .collect();
 
-        Ok(Tensor {
-            data,
-            shape: Shape {
-                rows: self.shape.rows,
-                cols: self.shape.cols,
-            },
-        })
+            Ok(Tensor {
+                data,
+                shape: self.shape.clone(),
+            })
+        } else {
+            self.broadcast(other, |a, b| a * b)
+        }
     }
 }
 
@@ -357,26 +419,22 @@ impl Div for &Tensor {
     type Output = Result<Tensor, TensorError>;
 
     fn div(self, other: &Tensor) -> Self::Output {
-        let data: Result<Vec<f32>, TensorError> = self
-            .data
-            .iter()
-            .zip(other.data.iter())
-            .map(|(a, b)| {
-                if b.abs() < f32::EPSILON {
-                    Err(TensorError::DivisionByZero)
-                } else {
-                    Ok(a / b)
-                }
-            })
-            .collect();
+        //TODO: we assume that we'll never have 0 as value
+        if self.shape() == other.shape() {
+            let data = self
+                .data
+                .iter()
+                .zip(other.data.iter())
+                .map(|(a, b)| a / b)
+                .collect();
 
-        Ok(Tensor {
-            data: data?,
-            shape: Shape {
-                rows: self.shape.rows,
-                cols: self.shape.cols,
-            },
-        })
+            Ok(Tensor {
+                data,
+                shape: self.shape.clone(),
+            })
+        } else {
+            self.broadcast(other, |a, b| a / b)
+        }
     }
 }
 
@@ -400,7 +458,7 @@ impl Sub<f32> for &Tensor {
     type Output = Tensor;
 
     fn sub(self, scalar: f32) -> Self::Output {
-        let data: Vec<f32> = self.data.iter().map(|x| x - scalar).collect();
+        let data = self.data.iter().map(|x| x - scalar).collect();
         Tensor {
             data,
             shape: Shape {
@@ -415,7 +473,7 @@ impl Mul<f32> for &Tensor {
     type Output = Tensor;
 
     fn mul(self, scalar: f32) -> Self::Output {
-        let data: Vec<f32> = self.data.iter().map(|x| x * scalar).collect();
+        let data = self.data.iter().map(|x| x * scalar).collect();
         Tensor {
             data,
             shape: Shape {
@@ -430,7 +488,7 @@ impl Div<f32> for &Tensor {
     type Output = Tensor;
 
     fn div(self, scalar: f32) -> Self::Output {
-        let data: Vec<f32> = self.data.iter().map(|x| x / scalar).collect();
+        let data = self.data.iter().map(|x| x / scalar).collect();
         Tensor {
             data,
             shape: Shape {
@@ -466,6 +524,67 @@ impl fmt::Debug for Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_broadcast_wrong() {
+        let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
+        let b = Tensor::from([[10.0, 20.0, 20.0]]);
+
+        let result = &a + &b;
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_broadcast_addition() -> Result<(), TensorError> {
+        let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
+        let b = Tensor::from([[10.0, 20.0]]);
+
+        let result = (&a + &b)?;
+
+        let expected = Tensor::from([[11.0, 22.0], [13.0, 24.0]]);
+        assert_eq!(result.data, expected.data);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_broadcast_subtraction() -> Result<(), TensorError> {
+        let a = Tensor::from([[10.0, 20.0], [30.0, 40.0]]);
+        let b = Tensor::from([[5.0], [15.0]]);
+        let result = (&a - &b)?;
+
+        // b broadcasts to [[5,5], [15,15]], result: [[5,15], [15,25]]
+        let expected = Tensor::from([[5.0, 15.0], [15.0, 25.0]]);
+        assert_eq!(result.data, expected.data);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_broadcast_multiplication() -> Result<(), TensorError> {
+        let a = Tensor::from([[2.0, 4.0], [6.0, 8.0]]);
+        let b = Tensor::from([[3.0]]);
+        let result = (&a * &b)?;
+
+        let expected = Tensor::from([[6.0, 12.0], [18.0, 24.0]]);
+        assert_eq!(result.data, expected.data);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_broadcast_division() -> Result<(), TensorError> {
+        let a = Tensor::from([[10.0, 20.0], [30.0, 40.0]]);
+        let b = Tensor::from([[2.0, 4.0]]);
+
+        let result = (&a / &b)?;
+
+        let expected = Tensor::from([[5.0, 5.0], [15.0, 10.0]]);
+        assert_eq!(result.data, expected.data);
+
+        Ok(())
+    }
 
     #[test]
     fn test_tensor_mean() -> Result<(), TensorError> {
