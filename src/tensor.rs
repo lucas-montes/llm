@@ -6,6 +6,8 @@ use std::{
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+use crate::erf::erf;
+
 #[derive(Debug)]
 pub enum TensorError {
     DimensionMismatch {
@@ -157,29 +159,20 @@ impl Tensor {
         }
     }
 
-    /// Get element at (row, col)
-    pub fn get(&self, row: usize, col: usize) -> Result<f32, TensorError> {
-        if row >= self.shape.rows || col >= self.shape.cols {
-            return Err(TensorError::IndexOutOfBounds {
-                row,
-                col,
-                shape: self.shape.clone(),
-            });
+    pub fn tanh(&self) -> Tensor {
+        let data = self.data.iter().map(|x| x.tanh()).collect();
+        Tensor {
+            data,
+            shape: self.shape.clone(),
         }
-        Ok(self.data[row * self.shape.cols + col])
     }
 
-    /// Set element at (row, col)
-    pub fn set(&mut self, row: usize, col: usize, value: f32) -> Result<(), TensorError> {
-        if row >= self.shape.rows || col >= self.shape.cols {
-            return Err(TensorError::IndexOutOfBounds {
-                row,
-                col,
-                shape: self.shape.clone(),
-            });
+    pub fn erf(&self) -> Tensor {
+        let data = self.data.iter().map(|x| erf(*x)).collect();
+        Tensor {
+            data,
+            shape: self.shape.clone(),
         }
-        self.data[row * self.shape.cols + col] = value;
-        Ok(())
     }
 
     pub fn shape(&self) -> Shape {
@@ -225,28 +218,6 @@ impl Tensor {
         }
 
         result
-    }
-
-    /// Sum all elements
-    pub fn sum(&self) -> f32 {
-        self.data.iter().sum()
-    }
-
-    /// Mean of all elements
-    pub fn mean(&self) -> f32 {
-        self.sum() / (self.data.len() as f32)
-    }
-
-    /// Element-wise power
-    pub fn pow(&self, exponent: f32) -> Tensor {
-        let data: Vec<_> = self.data.iter().map(|x| x.powf(exponent)).collect();
-        Tensor::from(data)
-    }
-
-    /// Element-wise square root
-    pub fn sqrt(&self) -> Tensor {
-        let data: Vec<_> = self.data.iter().map(|x| x.sqrt()).collect();
-        Tensor::from(data)
     }
 
     fn get_broadcasted(&self, row: usize, col: usize) -> f32 {
@@ -442,7 +413,18 @@ impl Div for &Tensor {
     }
 }
 
-// Scalar operations
+impl Add<&Tensor> for f32 {
+    type Output = Tensor;
+
+    fn add(self, tensor: &Tensor) -> Self::Output {
+        let data = tensor.data.iter().map(|x| x + self).collect();
+        Tensor {
+            data,
+            shape: tensor.shape.clone(),
+        }
+    }
+}
+
 impl Add<f32> for &Tensor {
     type Output = Tensor;
 
@@ -450,10 +432,7 @@ impl Add<f32> for &Tensor {
         let data = self.data.iter().map(|x| x + scalar).collect();
         Tensor {
             data,
-            shape: Shape {
-                rows: self.shape.rows,
-                cols: self.shape.cols,
-            },
+            shape: self.shape.clone(),
         }
     }
 }
@@ -465,10 +444,19 @@ impl Sub<f32> for &Tensor {
         let data = self.data.iter().map(|x| x - scalar).collect();
         Tensor {
             data,
-            shape: Shape {
-                rows: self.shape.rows,
-                cols: self.shape.cols,
-            },
+            shape: self.shape.clone(),
+        }
+    }
+}
+
+impl Mul<&Tensor> for f32 {
+    type Output = Tensor;
+
+    fn mul(self, tensor: &Tensor) -> Self::Output {
+        let data = tensor.data.iter().map(|x| x * self).collect();
+        Tensor {
+            data,
+            shape: tensor.shape.clone(),
         }
     }
 }
@@ -480,10 +468,7 @@ impl Mul<f32> for &Tensor {
         let data = self.data.iter().map(|x| x * scalar).collect();
         Tensor {
             data,
-            shape: Shape {
-                rows: self.shape.rows,
-                cols: self.shape.cols,
-            },
+            shape: self.shape.clone(),
         }
     }
 }
@@ -495,10 +480,7 @@ impl Div<f32> for &Tensor {
         let data = self.data.iter().map(|x| x / scalar).collect();
         Tensor {
             data,
-            shape: Shape {
-                rows: self.shape.rows,
-                cols: self.shape.cols,
-            },
+            shape: self.shape.clone(),
         }
     }
 }
@@ -598,13 +580,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tensor_mean() -> Result<(), TensorError> {
-        let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
-        assert_eq!(a.mean(), 2.5);
-        Ok(())
-    }
-
-    #[test]
     fn test_tensor_matmul() -> Result<(), TensorError> {
         let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
         let b = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
@@ -665,6 +640,26 @@ mod tests {
 
         let expected = Tensor::from([[2.0, 4.0], [6.0, 8.0]]);
         assert_eq!(result.data, expected.data);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_erf() -> Result<(), TensorError> {
+        let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
+
+        let expected = Tensor::from([[0.8427008, 0.9953223], [1.0, 1.0]]);
+        assert_eq!(a.erf().data, expected.data);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_tanh() -> Result<(), TensorError> {
+        let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
+
+        let expected = Tensor::from([[0.7615942, 0.9640276], [0.9950548, 0.9993293]]);
+        assert_eq!(a.tanh().data, expected.data);
 
         Ok(())
     }
