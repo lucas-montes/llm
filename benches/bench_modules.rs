@@ -4,4 +4,5 @@ mod benchmarks;
 
 criterion_main! {
     benchmarks::modules::benches,
+    benchmarks::tensor::benches,
 }

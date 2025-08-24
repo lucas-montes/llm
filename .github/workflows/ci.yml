@@ -1,0 +1,37 @@
+name: Lint & Test
+
+on:
+  workflow_call:
+  push:
+    branches:
+      - '*'
+    tags-ignore:
+      - '**'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test-and-lint:
+    name: Test and lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Rust fmt
+        run: cargo fmt -- --check
+
+      - name: Rust clippy
+        run: cargo clippy --locked -- -Dclippy::all -Dclippy::pedantic -D warnings
+
+      - name: Rust test
+        run: cargo test --all --locked

@@ -1,4 +1,5 @@
 pub mod modules;
+pub mod tensor;
 
 mod config {
     use criterion::{BenchmarkGroup, Criterion, measurement::WallTime};

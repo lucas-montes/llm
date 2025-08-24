@@ -1,4 +1,5 @@
 use std::{
+    arch::x86_64::{__m128, _mm_load_ps, _mm_rsqrt_ps},
     fmt,
     ops::{Add, Div, Mul, Sub},
 };
@@ -159,10 +160,107 @@ impl Tensor {
         }
     }
 
+    pub fn powf(&self, exp: f32) -> Tensor {
+        let data = self.data.iter().map(|x| x.powf(exp)).collect();
+        Tensor {
+            data,
+            shape: self.shape.clone(),
+        }
+    }
+
+    pub fn mean(&self) -> Tensor {
+        let cols = self.shape.cols as f32;
+
+        let data = (0..self.shape.rows)
+            .map(|i| {
+                let start = i * self.shape.cols;
+                let end = start + self.shape.cols;
+                let row_sum: f32 = self.data[start..end].iter().sum();
+                row_sum / cols
+            })
+            .collect();
+        Tensor {
+            data,
+            shape: Shape {
+                rows: self.shape.rows,
+                cols: 1,
+            },
+        }
+    }
+
     pub fn tanh(&self) -> Tensor {
         let data = self.data.iter().map(|x| x.tanh()).collect();
         Tensor {
             data,
+            shape: self.shape.clone(),
+        }
+    }
+
+    pub fn rsqrt_slow(&self) -> Tensor {
+        let data = self.data.iter().map(|&x| 1.0 / x.sqrt()).collect();
+        Tensor {
+            data,
+            shape: self.shape.clone(),
+        }
+    }
+
+    pub fn rsqrt(&self) -> Tensor {
+        let data = self
+            .data
+            .iter()
+            .map(|&x| {
+                let mut y = f32::from_bits(0x5f3759df - (x.to_bits() >> 1));
+                y = y * (1.5 - ((x * 0.5) * y * y)); // One Newton iteration
+                y
+            })
+            .collect();
+        Tensor {
+            data,
+            shape: self.shape.clone(),
+        }
+    }
+
+    pub fn rsqrt_simd(&self) -> Tensor {
+        let len = self.data.len();
+        let mut result_data = Vec::with_capacity(len);
+
+        // Process complete chunks of 4 with direct SIMD
+        let complete_chunks = len / 4;
+        let remainder = len % 4;
+
+        // Process complete chunks - fastest path
+        for i in 0..complete_chunks {
+            let start_idx = i * 4;
+            unsafe {
+                let input: __m128 = _mm_load_ps(self.data.as_ptr().add(start_idx));
+                let result: __m128 = _mm_rsqrt_ps(input);
+                let output: [f32; 4] = std::mem::transmute(result);
+                result_data.extend_from_slice(&output);
+            }
+        }
+
+        // Handle remainder with padded SIMD
+        if remainder > 0 {
+            let start_idx = complete_chunks * 4;
+            let mut padded = [1.0; 4]; // rsqrt(1.0) = 1.0
+
+            // Copy remaining elements
+            for i in 0..remainder {
+                padded[i] = self.data[start_idx + i];
+            }
+
+            unsafe {
+                let input: __m128 = std::mem::transmute(padded);
+                let result: __m128 = _mm_rsqrt_ps(input);
+                let output: [f32; 4] = std::mem::transmute(result);
+
+                // Only take the elements we need
+                result_data.extend_from_slice(&output[..remainder]);
+            }
+        }
+
+        Tensor {
+            data: result_data,
             shape: self.shape.clone(),
         }
     }
@@ -260,15 +358,21 @@ impl Tensor {
     }
 }
 
+impl Eq for Tensor {}
+
+impl PartialEq for Tensor {
+    fn eq(&self, other: &Self) -> bool {
+        self.shape == other.shape && self.data == other.data
+    }
+}
+
 impl From<Shape> for Tensor {
     fn from(data: Shape) -> Self {
         Self::new(data.rows, data.cols)
     }
 }
 
-// From trait implementations
 impl From<Vec<f32>> for Tensor {
-    /// Create a row vector (1×n) from Vec<f32>
     fn from(data: Vec<f32>) -> Self {
         let cols = data.len();
         Self {
@@ -279,7 +383,6 @@ impl From<Vec<f32>> for Tensor {
 }
 
 impl From<Vec<Vec<f32>>> for Tensor {
-    /// Create a tensor from 2D vector
     fn from(matrix: Vec<Vec<f32>>) -> Self {
         if matrix.is_empty() {
             return Self::new(0, 0);
@@ -288,7 +391,6 @@ impl From<Vec<Vec<f32>>> for Tensor {
         let rows = matrix.len();
         let cols = matrix[0].len();
 
-        // Flatten the 2D vector
         let data = matrix.into_iter().flatten().collect();
 
         Self {
@@ -299,7 +401,6 @@ impl From<Vec<Vec<f32>>> for Tensor {
 }
 
 impl From<f32> for Tensor {
-    /// Create a 1×1 tensor from a scalar
     fn from(scalar: f32) -> Self {
         Self {
             data: vec![scalar],
@@ -308,7 +409,6 @@ impl From<f32> for Tensor {
     }
 }
 
-// Generic implementation for any 2D array (requires const generics)
 impl<const M: usize, const N: usize> From<[[f32; N]; M]> for Tensor {
     /// Create an M×N tensor from a 2D array
     fn from(array: [[f32; N]; M]) -> Self {
@@ -320,7 +420,6 @@ impl<const M: usize, const N: usize> From<[[f32; N]; M]> for Tensor {
     }
 }
 
-// Element-wise addition
 impl Add for &Tensor {
     type Output = Result<Tensor, TensorError>;
 
@@ -343,7 +442,6 @@ impl Add for &Tensor {
     }
 }
 
-// Element-wise subtraction
 impl Sub for &Tensor {
     type Output = Result<Tensor, TensorError>;
 
@@ -366,7 +464,6 @@ impl Sub for &Tensor {
     }
 }
 
-// Element-wise multiplication (Hadamard product)
 impl Mul for &Tensor {
     type Output = Result<Tensor, TensorError>;
 
@@ -384,12 +481,11 @@ impl Mul for &Tensor {
                 shape: self.shape.clone(),
             })
         } else {
-            self.broadcast(other, |a, b| a * b)
+            self.broadcast(&other, |a, b| a * b)
         }
     }
 }
 
-// Element-wise division
 impl Div for &Tensor {
     type Output = Result<Tensor, TensorError>;
 
@@ -429,11 +525,7 @@ impl Add<f32> for &Tensor {
     type Output = Tensor;
 
     fn add(self, scalar: f32) -> Self::Output {
-        let data = self.data.iter().map(|x| x + scalar).collect();
-        Tensor {
-            data,
-            shape: self.shape.clone(),
-        }
+        scalar + self
     }
 }
 
@@ -465,11 +557,7 @@ impl Mul<f32> for &Tensor {
     type Output = Tensor;
 
     fn mul(self, scalar: f32) -> Self::Output {
-        let data = self.data.iter().map(|x| x * scalar).collect();
-        Tensor {
-            data,
-            shape: self.shape.clone(),
-        }
+        scalar * self
     }
 }
 
@@ -485,15 +573,15 @@ impl Div<f32> for &Tensor {
     }
 }
 
-// Debug implementation
 impl fmt::Debug for Tensor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let precision = f.precision().unwrap_or(10); // Default to 10 if not set
         write!(f, "Tensor({}x{}) [\n", self.shape.rows, self.shape.cols)?;
         for i in 0..self.shape.rows {
             write!(f, "  [")?;
             for j in 0..self.shape.cols {
                 let val = self.data[i * self.shape.cols + j];
-                write!(f, "{:8.4}", val)?;
+                write!(f, "{:.*}", precision, val)?;
                 if j < self.shape.cols - 1 {
                     write!(f, ", ")?;
                 }
@@ -507,6 +595,14 @@ impl fmt::Debug for Tensor {
     }
 }
 
+fn reciprocal_sqrt(values: [f32; 4]) -> [f32; 4] {
+    unsafe {
+        let input: __m128 = std::mem::transmute(values);
+        let result: __m128 = _mm_rsqrt_ps(input);
+        std::mem::transmute(result)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,6 +612,35 @@ mod tests {
         println!("Tensor: {:?}", Tensor::new(0, 3));
 
         println!("Tensor: {:?}", Tensor::new(3, 2));
+    }
+
+    #[test]
+    fn test_rsqrt() {
+        let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
+        let result = reciprocal_sqrt(a.data()[0..4].try_into().unwrap());
+        println!("Result: {:?}", result);
+        println!("Result: {:?}", a.rsqrt_simd());
+        assert_eq!(
+            a.rsqrt_slow(),
+            Tensor::from([[1.0, 0.7071], [0.5774, 0.5000]])
+        );
+    }
+
+    #[test]
+    fn test_mean() {
+        let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
+
+        // No keep dim
+        // assert_eq!(a.mean(), Tensor::from(vec![1.5, 3.5]));
+
+        //keep dim
+        assert_eq!(a.mean(), Tensor::from([[1.5], [3.5]]));
+    }
+
+    #[test]
+    fn test_powf() {
+        let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
+        assert_eq!(a.powf(2.0), Tensor::from([[1.0, 4.0], [9.0, 16.0]]));
     }
 
     #[test]
@@ -536,7 +661,7 @@ mod tests {
         let result = (&a + &b)?;
 
         let expected = Tensor::from([[11.0, 22.0], [13.0, 24.0]]);
-        assert_eq!(result.data, expected.data);
+        assert_eq!(result, expected);
 
         Ok(())
     }
@@ -549,7 +674,7 @@ mod tests {
 
         // b broadcasts to [[5,5], [15,15]], result: [[5,15], [15,25]]
         let expected = Tensor::from([[5.0, 15.0], [15.0, 25.0]]);
-        assert_eq!(result.data, expected.data);
+        assert_eq!(result, expected);
 
         Ok(())
     }
@@ -561,7 +686,7 @@ mod tests {
         let result = (&a * &b)?;
 
         let expected = Tensor::from([[6.0, 12.0], [18.0, 24.0]]);
-        assert_eq!(result.data, expected.data);
+        assert_eq!(result, expected);
 
         Ok(())
     }
@@ -574,7 +699,7 @@ mod tests {
         let result = (&a / &b)?;
 
         let expected = Tensor::from([[5.0, 5.0], [15.0, 10.0]]);
-        assert_eq!(result.data, expected.data);
+        assert_eq!(result, expected);
 
         Ok(())
     }
@@ -584,10 +709,10 @@ mod tests {
         let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
         let b = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
 
-        let result = &a.matmul(&b)?;
+        let result = a.matmul(&b)?;
 
         let expected = Tensor::from([[7.0, 10.0], [15.0, 22.0]]);
-        assert_eq!(result.data, expected.data);
+        assert_eq!(result, expected);
 
         Ok(())
     }
@@ -600,7 +725,7 @@ mod tests {
         let result = (&a / &b)?;
 
         let expected = Tensor::from([[3.0, 2.0], [0.5, 2.0]]);
-        assert_eq!(result.data, expected.data);
+        assert_eq!(result, expected);
 
         Ok(())
     }
@@ -613,7 +738,7 @@ mod tests {
         let result = (&a * &b)?;
 
         let expected = Tensor::from([[1.0, 4.0], [9.0, 16.0]]);
-        assert_eq!(result.data, expected.data);
+        assert_eq!(result, expected);
 
         Ok(())
     }
@@ -626,7 +751,7 @@ mod tests {
         let result = (&a - &b)?;
 
         let expected = Tensor::from([[0.0, 0.0], [0.0, 0.0]]);
-        assert_eq!(result.data, expected.data);
+        assert_eq!(result, expected);
 
         Ok(())
     }
@@ -639,7 +764,7 @@ mod tests {
         let result = (&a + &b)?;
 
         let expected = Tensor::from([[2.0, 4.0], [6.0, 8.0]]);
-        assert_eq!(result.data, expected.data);
+        assert_eq!(result, expected);
 
         Ok(())
     }

@@ -2,10 +2,10 @@ use crate::tensor::{Tensor, TensorError};
 
 pub trait Module {
     type InitParams;
-    type ForwardParams;
+    type ForwardParams<'a>;
     fn init(params: Self::InitParams) -> Self;
     // Forward pass through the module, this is the main computation
-    fn forward(&mut self, params: Self::ForwardParams) -> Tensor;
+    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor;
 }
 
 const M_2_SQRTPI: f32 = 1.12837916709551257390;
@@ -41,10 +41,9 @@ impl InitParams {
 
 impl Module for Linear {
     type InitParams = InitParams;
-    type ForwardParams = Tensor;
+    type ForwardParams<'a> = &'a Tensor;
 
     fn init(params: Self::InitParams) -> Self {
-        //TODO: we probably want to pass the seed
         Self {
             weight: Tensor::rand(params.out_features, params.in_features, params.seed),
             bias: params
@@ -53,7 +52,7 @@ impl Module for Linear {
         }
     }
 
-    fn forward(&mut self, params: Self::ForwardParams) -> Tensor {
+    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor {
         let result = params.matmul(&self.weight.transpose());
         let result = match (result, self.bias.as_ref()) {
             (Ok(result), Some(b)) => &result + b,
@@ -102,7 +101,7 @@ mod tests {
         };
         let mut linear = Linear::init(init_params);
         let input = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
-        let output = linear.forward(input);
+        let output = linear.forward(&input);
         assert_eq!(
             output.data(),
             &[
@@ -121,7 +120,7 @@ mod tests {
         };
         let mut linear = Linear::init(init_params);
         let input = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
-        let output = linear.forward(input);
+        let output = linear.forward(&input);
         assert_eq!(
             output.data(),
             &[

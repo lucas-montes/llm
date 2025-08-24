@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # This will trigger for any tag that starts with "v", e.g., v1.0.0, v2.0.1
+
+
+  # pull_request event is required only for autolabeler
+  pull_request:
+    # Only following types are handled by the action, but one can default to all as well
+    types: [opened, reopened, synchronize]
+  # pull_request_target event is required for autolabeler to support PRs from forks
+  # pull_request_target:
+  #   types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  create-release:
+    needs: lint-and-test
+    permissions:
+      # write permission is required to create a github release
+      contents: write
+      # write permission is required for autolabeler
+      # otherwise, read permission is required at least
+      pull-requests: write
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get latest tag
+        # Use a little bit of bash to extract the tag name from the GitHub ref
+        run: echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+
+      # (Optional) GitHub Enterprise requires GHE_HOST variable set
+      #- name: Set GHE_HOST
+      #  run: |
+      #    echo "GHE_HOST=${GITHUB_SERVER_URL##https:\/\/}" >> $GITHUB_ENV
+
+      # Drafts your next Release notes as Pull Requests are merged into "master"
+      - uses: release-drafter/release-drafter@v6
+        # (Optional) specify config name to use, relative to .github/. Default: release-drafter.yml
+        with:
+          publish: true
+          name: ${{ env.RELEASE_VERSION }}
+          tag: ${{ env.RELEASE_VERSION }}
+          version: ${{ env.RELEASE_VERSION }}
+        #   config-name: release.yml
+        #   disable-autolabeler: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
