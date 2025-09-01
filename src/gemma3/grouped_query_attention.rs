@@ -131,6 +131,8 @@ impl Module for GroupedQueryAttention {
         let queries = self.w_query.forward(&params.x);
         let keys = self.w_key.forward(&params.x);
         let values = self.w_value.forward(&params.x);
+
+        // let queries = queries.view(rows, cols)
         todo!()
     }
 }

@@ -81,6 +81,10 @@ pub struct Shape {
 }
 
 impl Shape {
+    pub fn new(rows: usize, cols: usize) -> Self {
+        Self { rows, cols }
+    }
+
     fn size(&self) -> usize {
         self.rows * self.cols
     }
@@ -139,6 +143,98 @@ impl Tensor {
             data: vec![Default::default(); rows * cols],
             shape: Shape { rows, cols },
         }
+    }
+
+    pub fn ones(rows: usize, cols: usize) -> Self {
+        Self {
+            data: vec![1.0; rows * cols],
+            shape: Shape { rows, cols },
+        }
+    }
+
+    pub fn triu(&self, k: isize) -> Tensor {
+        let rows = self.shape.rows;
+        let cols = self.shape.cols;
+        let mut data = self.data.clone();
+
+        for i in 0..rows {
+            for j in 0..cols {
+                // Only keep elements where j - i >= k
+                if (j as isize) - (i as isize) < k {
+                    data[i * cols + j] = 0.0;
+                }
+            }
+        }
+
+        Tensor {
+            data,
+            shape: Shape { rows, cols },
+        }
+    }
+
+    pub fn repeat_interleave(&self, repeats: usize, dim: usize) -> Tensor {
+        let rows = self.shape.rows;
+        let cols = self.shape.cols;
+        let mut data = Vec::new();
+
+        match dim {
+            0 => {
+                // repeat rows
+                for i in 0..rows {
+                    for _ in 0..repeats {
+                        for j in 0..cols {
+                            data.push(self.data[i * cols + j]);
+                        }
+                    }
+                }
+                Tensor {
+                    data,
+                    shape: Shape {
+                        rows: rows * repeats,
+                        cols,
+                    },
+                }
+            }
+            1 => {
+                // repeat columns
+                for i in 0..rows {
+                    for j in 0..cols {
+                        for _ in 0..repeats {
+                            data.push(self.data[i * cols + j]);
+                        }
+                    }
+                }
+                Tensor {
+                    data,
+                    shape: Shape {
+                        rows,
+                        cols: cols * repeats,
+                    },
+                }
+            }
+            _ => panic!("Invalid dim for repeat_interleave"),
+        }
+    }
+
+    pub fn masked_fill(&self, mask: &Tensor, value: f32) -> Result<Tensor, TensorError> {
+        if self.shape != mask.shape {
+            return Err(TensorError::DimensionMismatch {
+                expected: (self.shape.rows, self.shape.cols),
+                found: (mask.shape.rows, mask.shape.cols),
+            });
+        }
+
+        let data = self
+            .data
+            .iter()
+            .zip(mask.data.iter())
+            .map(|(x, m)| if *m != 0.0 { *x } else { value })
+            .collect();
+
+        Ok(Tensor {
+            data,
+            shape: self.shape.clone(),
+        })
     }
 
     pub fn data(&self) -> &[f32] {
@@ -280,6 +376,62 @@ impl Tensor {
         }
     }
 
+    /// https://docs.pytorch.org/docs/stable/generated/torch.Tensor.view.html
+    /// Tricky, it should either return a view or a copy
+    /// TODO: for now copy this thing and later on create a view struct to be returned
+    pub fn view(&self, rows: Option<usize>, cols: Option<usize>) -> Result<Tensor, TensorError> {
+        let total = self.data.len();
+
+        match (rows, cols) {
+            (Some(r), Some(c)) => {
+                if r * c != total {
+                    return Err(TensorError::InvalidDataLength {
+                        expected: r * c,
+                        found: total,
+                    });
+                }
+                Ok(Tensor {
+                    data: self.data.clone(),
+                    shape: Shape { rows: r, cols: c },
+                })
+            }
+            (None, Some(c)) => {
+                if total % c != 0 {
+                    return Err(TensorError::InvalidDataLength {
+                        expected: c,
+                        found: total,
+                    });
+                }
+                Ok(Tensor {
+                    data: self.data.clone(),
+                    shape: Shape {
+                        rows: total / c,
+                        cols: c,
+                    },
+                })
+            }
+            (Some(r), None) => {
+                if total % r != 0 {
+                    return Err(TensorError::InvalidDataLength {
+                        expected: r,
+                        found: total,
+                    });
+                }
+                Ok(Tensor {
+                    data: self.data.clone(),
+                    shape: Shape {
+                        rows: r,
+                        cols: total / r,
+                    },
+                })
+            }
+            (None, None) => Err(TensorError::InvalidDataLength {
+                expected: total,
+                found: 0,
+            }),
+        }
+    }
+
     /// Matrix multiplication
     pub fn matmul(&self, other: &Tensor) -> Result<Tensor, TensorError> {
         if self.shape.cols != other.shape.rows {
@@ -305,16 +457,13 @@ impl Tensor {
         Ok(result)
     }
 
-    /// Transpose the tensor
     pub fn transpose(&self) -> Tensor {
         let mut result = Tensor::new(self.shape.cols, self.shape.rows);
-
         for i in 0..self.shape.rows {
             for j in 0..self.shape.cols {
                 result.data[j * self.shape.rows + i] = self.data[i * self.shape.cols + j];
             }
         }
-
         result
     }
 
@@ -615,14 +764,43 @@ mod tests {
     }
 
     #[test]
+    fn test_view() {
+        let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
+        assert_eq!(
+            a.view(Some(1), None).unwrap(),
+            Tensor::from([[1.0, 2.0, 3.0, 4.0]])
+        );
+
+        assert_eq!(
+            a.view(Some(1), Some(4)).unwrap(),
+            Tensor::from([[1.0, 2.0, 3.0, 4.0]])
+        );
+
+        assert_eq!(
+            a.view(None, Some(1)).unwrap(),
+            Tensor::from([[1.0], [2.0], [3.0], [4.0]])
+        );
+
+        assert_eq!(
+            a.view(Some(4), Some(1)).unwrap(),
+            Tensor::from([[1.0], [2.0], [3.0], [4.0]])
+        );
+
+        assert!(a.view(Some(5), Some(1)).is_err());
+
+        assert!(a.view(Some(5), Some(5)).is_err());
+
+        assert!(a.view(None, None).is_err());
+    }
+
+    #[test]
     fn test_rsqrt() {
         let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
-        let result = reciprocal_sqrt(a.data()[0..4].try_into().unwrap());
-        println!("Result: {:?}", result);
-        println!("Result: {:?}", a.rsqrt_simd());
+        // let result = reciprocal_sqrt(a.data()[0..4].try_into().unwrap());
+
         assert_eq!(
-            a.rsqrt_slow(),
-            Tensor::from([[1.0, 0.7071], [0.5774, 0.5000]])
+            a.rsqrt(),
+            Tensor::from([[0.9983071685, 0.7069300413], [0.5768468380, 0.4991535842]])
         );
     }
 
@@ -787,5 +965,121 @@ mod tests {
         assert_eq!(a.tanh().data, expected.data);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_triu() {
+        let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
+        let expected = Tensor::from([[0.0, 2.0], [0.0, 0.0]]);
+        assert_eq!(a.triu(1), expected);
+    }
+
+    #[test]
+    fn test_repeat_interleave() {
+        let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
+        let result = a.repeat_interleave(2, 0);
+        let expected = Tensor::from([[1.0, 2.0], [1.0, 2.0], [3.0, 4.0], [3.0, 4.0]]);
+        assert_eq!(result, expected);
+
+        let result = a.repeat_interleave(2, 1);
+        let expected = Tensor::from([
+            [1.0000000000, 1.0000000000, 2.0000000000, 2.0000000000],
+            [3.0000000000, 3.0000000000, 4.0000000000, 4.0000000000],
+        ]);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_masked_fill() {
+        let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
+        let mask = Tensor::from([[0.0, 1.0], [1.0, 0.0]]);
+        let result = a.masked_fill(&mask, -1.0).unwrap();
+        let expected = Tensor::from([[-1.0, 2.0], [3.0, -1.0]]);
+        assert_eq!(result, expected);
+    }
+
+        #[test]
+    fn test_view_transformation() {
+        let queries = Tensor::from(
+            [[ 0.7383,  0.4590,  0.3379, -0.1719,  0.0024,  0.0132,  0.9023,
+          -0.8086, -0.7461, -0.2559,  1.0938, -0.6367,  0.0347,  0.7539,
+           0.3105, -0.4219, -0.9453, -0.5312, -0.0771,  0.1904,  0.6211,
+          -0.7734,  0.3281,  1.0625, -0.3242, -0.4766,  0.2754, -0.6211,
+           0.8516, -0.3418, -1.0078,  0.3438],
+         [ 0.2852,  0.3242, -0.0037, -0.0498,  0.8945, -0.0322,  0.8438,
+           0.1328, -0.7383,  0.6289,  0.8906,  0.8555,  0.5586,  0.4141,
+           0.9023, -0.5781, -0.6289, -0.5547,  0.6992,  0.4473,  1.0000,
+          -0.4785,  0.0991, -0.0649,  0.7773,  0.2021, -0.2559, -0.4922,
+           0.7617,  0.0240, -0.8398,  0.3203],
+         [-0.7422, -0.4316, -0.2637,  0.1719, -0.2812,  0.0791, -1.0547,
+           0.6055,  0.8555,  0.0452, -1.1953,  0.2041, -0.1562, -0.8359,
+          -0.4766,  0.5117,  0.9414,  0.6680, -0.1699, -0.2852, -0.7852,
+           0.7930, -0.3770, -0.8047,  0.0061,  0.3047, -0.1533,  0.6289,
+          -0.9336,  0.3418,  1.0469, -0.4727]]
+        );
+
+        let queries = queries.view(1, 3, 4, 8).unwrap();
+
+        let expected = Tensor::from(
+            [[[ 0.7383,  0.4590,  0.3379, -0.1719,  0.0024,  0.0132,  0.9023,
+           -0.8086],
+          [-0.7461, -0.2559,  1.0938, -0.6367,  0.0347,  0.7539,  0.3105,
+           -0.4219],
+          [-0.9453, -0.5312, -0.0771,  0.1904,  0.6211, -0.7734,  0.3281,
+            1.0625],
+          [-0.3242, -0.4766,  0.2754, -0.6211,  0.8516, -0.3418, -1.0078,
+            0.3438]],
+
+         [[ 0.2852,  0.3242, -0.0037, -0.0498,  0.8945, -0.0322,  0.8438,
+            0.1328],
+          [-0.7383,  0.6289,  0.8906,  0.8555,  0.5586,  0.4141,  0.9023,
+           -0.5781],
+          [-0.6289, -0.5547,  0.6992,  0.4473,  1.0000, -0.4785,  0.0991,
+           -0.0649],
+          [ 0.7773,  0.2021, -0.2559, -0.4922,  0.7617,  0.0240, -0.8398,
+            0.3203]],
+
+         [[-0.7422, -0.4316, -0.2637,  0.1719, -0.2812,  0.0791, -1.0547,
+            0.6055],
+          [ 0.8555,  0.0452, -1.1953,  0.2041, -0.1562, -0.8359, -0.4766,
+            0.5117],
+          [ 0.9414,  0.6680, -0.1699, -0.2852, -0.7852,  0.7930, -0.3770,
+           -0.8047],
+          [ 0.0061,  0.3047, -0.1533,  0.6289, -0.9336,  0.3418,  1.0469,
+           -0.4727]]]
+        );
+
+        let queries = queries.transpose(1, 2);
+
+
+        let transpose_expected = Tensor::from(
+            [[[ 0.7383,  0.4590,  0.3379, -0.1719,  0.0024,  0.0132,  0.9023,
+           -0.8086],
+          [ 0.2852,  0.3242, -0.0037, -0.0498,  0.8945, -0.0322,  0.8438,
+            0.1328],
+          [-0.7422, -0.4316, -0.2637,  0.1719, -0.2812,  0.0791, -1.0547,
+            0.6055]],
+
+         [[-0.7461, -0.2559,  1.0938, -0.6367,  0.0347,  0.7539,  0.3105,
+           -0.4219],
+          [-0.7383,  0.6289,  0.8906,  0.8555,  0.5586,  0.4141,  0.9023,
+           -0.5781],
+          [ 0.8555,  0.0452, -1.1953,  0.2041, -0.1562, -0.8359, -0.4766,
+            0.5117]],
+
+         [[-0.9453, -0.5312, -0.0771,  0.1904,  0.6211, -0.7734,  0.3281,
+            1.0625],
+          [-0.6289, -0.5547,  0.6992,  0.4473,  1.0000, -0.4785,  0.0991,
+           -0.0649],
+          [ 0.9414,  0.6680, -0.1699, -0.2852, -0.7852,  0.7930, -0.3770,
+           -0.8047]],
+
+         [[-0.3242, -0.4766,  0.2754, -0.6211,  0.8516, -0.3418, -1.0078,
+            0.3438],
+          [ 0.7773,  0.2021, -0.2559, -0.4922,  0.7617,  0.0240, -0.8398,
+            0.3203],
+          [ 0.0061,  0.3047, -0.1533,  0.6289, -0.9336,  0.3418,  1.0469,
+           -0.4727]]]
+        );
     }
 }
