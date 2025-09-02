@@ -20,7 +20,7 @@ fn bench(c: &mut Criterion) {
         (4096, 4096),
         (10000, 10000),
     ] {
-        let tensor = llm::tensor::Tensor::rand(rows, cols, seed);
+        let tensor = llm::tensor::Tensor::rand(&[rows, cols], seed);
         let size = format!("rows({rows})xcols({cols})");
 
         benchmark.bench_with_input(BenchmarkId::new("regular_rqsrt", &size), &tensor, |b, tensor| {
@@ -35,11 +35,11 @@ fn bench(c: &mut Criterion) {
             });
         });
 
-        benchmark.bench_with_input(BenchmarkId::new("smid_rqsrt", &size), &tensor, |b, tensor| {
-            b.iter(|| {
-                tensor.rsqrt_simd();
-            });
-        });
+        // benchmark.bench_with_input(BenchmarkId::new("smid_rqsrt", &size), &tensor, |b, tensor| {
+        //     b.iter(|| {
+        //         tensor.rsqrt_simd();
+        //     });
+        // });
     }
 
     benchmark.finish()

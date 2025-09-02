@@ -25,8 +25,8 @@ impl Module for TransformerBlock {
     fn init(params: Self::InitParams) -> Self {
         Self {
             eps: params.eps,
-            scale: Tensor::new(1, params.emb_dim),
-            shift: params.bias.then(|| Tensor::new(1, params.emb_dim)),
+            scale: Tensor::new(&[1, params.emb_dim]),
+            shift: params.bias.then(|| Tensor::new(&[1, params.emb_dim])),
         }
     }
 

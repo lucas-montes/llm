@@ -45,15 +45,15 @@ impl Module for Linear {
 
     fn init(params: Self::InitParams) -> Self {
         Self {
-            weight: Tensor::rand(params.out_features, params.in_features, params.seed),
+            weight: Tensor::rand(&[params.out_features, params.in_features], params.seed),
             bias: params
                 .bias
-                .then(|| Tensor::rand(1, params.out_features, params.seed)),
+                .then(|| Tensor::rand(&[1, params.out_features], params.seed)),
         }
     }
 
     fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor {
-        let result = params.matmul(&self.weight.transpose());
+        let result = params.matmul(&self.weight.transpose(0,1));
         let result = match (result, self.bias.as_ref()) {
             (Ok(result), Some(b)) => &result + b,
             (Ok(result), None) => Ok(result),

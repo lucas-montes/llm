@@ -25,13 +25,13 @@ impl Module for RMSNorm {
     fn init(params: Self::InitParams) -> Self {
         Self {
             eps: params.eps,
-            scale: Tensor::new(1, params.emb_dim),
-            shift: params.bias.then(|| Tensor::new(1, params.emb_dim)),
+            scale: Tensor::new(&[1, params.emb_dim]),
+            shift: params.bias.then(|| Tensor::new(&[1, params.emb_dim])),
         }
     }
 
     fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor {
-        let var = params.powf(2.0).mean();
+        let var = params.powf(2.0).mean(None);
         let norm = (&(&var + self.eps).rsqrt() * params).unwrap();
         let result = &norm * &(1.0 + &self.scale);
         match (result, self.shift.as_ref()) {

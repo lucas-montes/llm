@@ -128,11 +128,59 @@ impl Module for GroupedQueryAttention {
     }
 
     fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor {
-        let queries = self.w_query.forward(&params.x);
-        let keys = self.w_key.forward(&params.x);
+        let mut dims = params.x.shape().dims().iter();
+
+        let b = *dims.next().unwrap();
+        let num_tokens = *dims.next().unwrap();
+
+        let mut queries = self.w_query.forward(&params.x);
+        let mut keys = self.w_key.forward(&params.x);
         let values = self.w_value.forward(&params.x);
 
-        // let queries = queries.view(rows, cols)
-        todo!()
+        queries = queries
+            .view(&[b, num_tokens, self.num_heads, self.head_dim])
+            .unwrap()
+            .transpose(1, 2);
+        keys = keys
+            .view(&[b, num_tokens, self.num_kv_groups, self.head_dim])
+            .unwrap()
+            .transpose(1, 2);
+        let values = values
+            .view(&[b, num_tokens, self.num_kv_groups, self.head_dim])
+            .unwrap()
+            .transpose(1, 2);
+
+        if let Some(norm) = self.q_norm.as_mut() {
+            queries = norm.forward(&queries);
+        };
+
+        if let Some(norm) = self.k_norm.as_mut() {
+            keys = norm.forward(&keys);
+        };
+
+        queries = params.rope.apply(&queries);
+        keys = params.rope.apply(&keys);
+
+        keys.repeat_interleave(self.group_size, 1);
+        values.repeat_interleave(self.group_size, 1);
+
+        queries = &queries * self.scaling;
+
+        let mut attn_scores = queries.matmul(&keys.transpose(2, 3)).unwrap();
+
+        //TODO: why mask is optional?
+        if let Some(mask) = params.mask.as_ref() {
+            attn_scores = attn_scores.masked_fill(mask, -f32::INFINITY).unwrap();
+        };
+
+        let attn_weights = attn_scores.softmax(-1).unwrap();
+
+        let context = (attn_weights.matmul(&values))
+            .unwrap()
+            .transpose(1, 2)
+            .view(&[b, num_tokens, self.d_out])
+            .unwrap();
+
+        self.out_proj.forward(&context)
     }
 }
