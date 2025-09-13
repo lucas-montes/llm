@@ -1,12 +1,17 @@
 use crate::{
-    modules::{Linear, Module, gelu},
-    tensor::Tensor,
+    linear::Linear, modules::{ gelu, Module}, tensor::Tensor
 };
 
 pub struct FeedForward {
     linear1: Linear,
     linear2: Linear,
     linear3: Linear,
+}
+
+impl From<InitParams> for FeedForward {
+    fn from(params: InitParams) -> Self {
+        Self::init(params)
+    }
 }
 
 pub struct InitParams {

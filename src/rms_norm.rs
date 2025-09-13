@@ -6,6 +6,12 @@ pub struct RMSNorm {
     shift: Option<Tensor>,
 }
 
+impl From<InitParams> for RMSNorm {
+    fn from(params: InitParams) -> Self {
+        Self::init(params)
+    }
+}
+
 pub struct InitParams {
     bias: bool,
     emb_dim: usize,

@@ -1,6 +1,5 @@
 use crate::{
-    modules::{Linear, Module},
-    tensor::Tensor,
+    linear::Linear, modules::Module, tensor::Tensor
 };
 
 use super::{rms_norm::RMSNorm, rope::Rope};
@@ -18,6 +17,12 @@ pub struct GroupedQueryAttention {
     q_norm: Option<RMSNorm>,
     k_norm: Option<RMSNorm>,
     scaling: f32,
+}
+
+impl From<InitParams> for GroupedQueryAttention {
+    fn from(params: InitParams) -> Self {
+        Self::init(params)
+    }
 }
 
 pub struct InitParams {
@@ -66,15 +71,21 @@ impl InitParams {
     }
 }
 
-pub struct ForwardParams {
-    x: Tensor,
-    mask: Option<Tensor>,
-    rope: Rope,
+pub struct ForwardParams<'a> {
+    x: &'a Tensor,
+    mask: &'a Tensor,
+    rope: &'a Rope,
+}
+
+impl<'a> ForwardParams<'a> {
+    pub fn new(x: &'a Tensor, mask: &'a Tensor, rope: &'a Rope) -> Self {
+        Self { x, mask, rope }
+    }
 }
 
 impl Module for GroupedQueryAttention {
     type InitParams = InitParams;
-    type ForwardParams<'a> = ForwardParams;
+    type ForwardParams<'a> = ForwardParams<'a>;
 
     fn init(params: Self::InitParams) -> Self {
         let d_out = params.num_heads * params.head_dim;
@@ -133,6 +144,7 @@ impl Module for GroupedQueryAttention {
         let b = *dims.next().unwrap();
         let num_tokens = *dims.next().unwrap();
 
+        // Apply projections
         let mut queries = self.w_query.forward(&params.x);
         let mut keys = self.w_key.forward(&params.x);
         let values = self.w_value.forward(&params.x);
@@ -145,11 +157,12 @@ impl Module for GroupedQueryAttention {
             .view(&[b, num_tokens, self.num_kv_groups, self.head_dim])
             .unwrap()
             .transpose(1, 2);
-        let values = values
+        let mut values = values
             .view(&[b, num_tokens, self.num_kv_groups, self.head_dim])
             .unwrap()
             .transpose(1, 2);
 
+        // Optional normalization
         if let Some(norm) = self.q_norm.as_mut() {
             queries = norm.forward(&queries);
         };
@@ -161,17 +174,15 @@ impl Module for GroupedQueryAttention {
         queries = params.rope.apply(&queries);
         keys = params.rope.apply(&keys);
 
-        keys.repeat_interleave(self.group_size, 1);
-        values.repeat_interleave(self.group_size, 1);
+        // Expand K and V to match number of heads
+        keys = keys.repeat_interleave(self.group_size, 1);
+        values = values.repeat_interleave(self.group_size, 1);
 
         queries = &queries * self.scaling;
 
         let mut attn_scores = queries.matmul(&keys.transpose(2, 3)).unwrap();
 
-        //TODO: why mask is optional?
-        if let Some(mask) = params.mask.as_ref() {
-            attn_scores = attn_scores.masked_fill(mask, -f32::INFINITY).unwrap();
-        };
+        attn_scores = attn_scores.masked_fill(&params.mask, -f32::INFINITY).unwrap();
 
         let attn_weights = attn_scores.softmax(-1).unwrap();
 
