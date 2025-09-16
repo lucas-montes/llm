@@ -1,6 +1,5 @@
 use crate::{modules::Module, tensor::Tensor};
 
-
 /// Applies an affine linear transformation to the incoming data: y=xAT+by=xA T+b.
 pub struct Linear {
     weight: Tensor,
@@ -45,7 +44,7 @@ impl Module for Linear {
     }
 
     fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor {
-        let result = params.matmul(&self.weight.transpose(0,1));
+        let result = params.matmul(&self.weight.transpose(0, 1));
         let result = match (result, self.bias.as_ref()) {
             (Ok(result), Some(b)) => &result + b,
             (Ok(result), None) => Ok(result),
@@ -54,7 +53,6 @@ impl Module for Linear {
         result.unwrap()
     }
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -1,6 +1,6 @@
 use crate::benchmarks::config;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use llm::{
     gemma3::{Gemma3, InitParams},
     modules::Module,

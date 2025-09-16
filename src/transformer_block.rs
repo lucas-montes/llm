@@ -107,7 +107,6 @@ impl Module for TransformerBlock {
     }
 
     fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor {
-
         let input_layernorm = self.input_layernorm.forward(params.x);
 
         let attn_params = super::grouped_query_attention::ForwardParams::new(

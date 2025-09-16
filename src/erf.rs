@@ -1,4 +1,3 @@
-
 const ERX: f32 = 8.45062911510467529297e-01; /* 0x3FEB0AC1, 0x60000000 */
 /*
  * Coefficients for approximation to  erf on [0,0.84375]
@@ -68,7 +67,6 @@ const SB6: f32 = 4.74528541206955367215e+02; /* 0x407DA874, 0xE79FE763 */
 const SB7: f32 = -2.24409524465858183362e+01; /* 0xC03670E2, 0x42712D62 */
 
 const SIGN_MASK: u32 = 2147483648;
-
 
 #[inline]
 pub fn fabs(x: f32) -> f32 {
@@ -161,8 +159,6 @@ pub fn erf(x: f32) -> f32 {
 
     if sign != 0 { -y } else { y }
 }
-
-
 
 #[cfg(test)]
 mod tests {

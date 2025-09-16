@@ -25,7 +25,7 @@ pub fn gelu(input: &Tensor, approximate: bool) -> Result<Tensor, TensorError> {
     }
 }
 
-pub struct Mask{
+pub struct Mask {
     global: Tensor,
     local: Tensor,
 }
@@ -49,14 +49,12 @@ impl Mask {
     pub fn local(&self) -> &Tensor {
         &self.local
     }
-
 }
 
 pub enum AttentionType {
     Sliding,
-    Full
+    Full,
 }
-
 
 #[cfg(test)]
 mod tests {

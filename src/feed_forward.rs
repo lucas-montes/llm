@@ -1,5 +1,7 @@
 use crate::{
-    linear::Linear, modules::{ gelu, Module}, tensor::Tensor
+    linear::Linear,
+    modules::{Module, gelu},
+    tensor::Tensor,
 };
 
 pub struct FeedForward {

@@ -1,6 +1,4 @@
-use crate::{
-    linear::Linear, modules::Module, tensor::Tensor
-};
+use crate::{linear::Linear, modules::Module, tensor::Tensor};
 
 use super::{rms_norm::RMSNorm, rope::Rope};
 
@@ -182,7 +180,9 @@ impl Module for GroupedQueryAttention {
 
         let mut attn_scores = queries.matmul(&keys.transpose(2, 3)).unwrap();
 
-        attn_scores = attn_scores.masked_fill(&params.mask, -f32::INFINITY).unwrap();
+        attn_scores = attn_scores
+            .masked_fill(&params.mask, -f32::INFINITY)
+            .unwrap();
 
         let attn_weights = attn_scores.softmax(-1).unwrap();
 

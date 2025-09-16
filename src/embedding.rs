@@ -67,7 +67,7 @@ impl Module for Embedding {
             // Copy this token's embedding vector to output
             output_data.extend_from_slice(&data[start_idx..end_idx]);
         }
-            // ALWAYS return with batch dimension: [1, seq_len, emb_dim] like pytorch
+        // ALWAYS return with batch dimension: [1, seq_len, emb_dim] like pytorch
         Tensor::new(&[1, num_tokens, self.embedding_dim], output_data)
     }
 }

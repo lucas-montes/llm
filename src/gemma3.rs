@@ -43,24 +43,24 @@ impl InitParams {
             rope_base: 1_000_000.0,
             sliding_window: 512,
             layer_types: vec![
-                AttentionType::Sliding,    // 0
-                AttentionType::Sliding,    // 1
-                AttentionType::Sliding,    // 2
-                AttentionType::Sliding,    // 3
-                AttentionType::Sliding,    // 4
-                AttentionType::Full,       // 5
-                AttentionType::Sliding,    // 6
-                AttentionType::Sliding,    // 7
-                AttentionType::Sliding,    // 8
-                AttentionType::Sliding,    // 9
-                AttentionType::Sliding,    // 10
-                AttentionType::Full,       // 11
-                AttentionType::Sliding,    // 12
-                AttentionType::Sliding,    // 13
-                AttentionType::Sliding,    // 14
-                AttentionType::Sliding,    // 15
-                AttentionType::Sliding,    // 16
-                AttentionType::Full,       // 17
+                AttentionType::Sliding, // 0
+                AttentionType::Sliding, // 1
+                AttentionType::Sliding, // 2
+                AttentionType::Sliding, // 3
+                AttentionType::Sliding, // 4
+                AttentionType::Full,    // 5
+                AttentionType::Sliding, // 6
+                AttentionType::Sliding, // 7
+                AttentionType::Sliding, // 8
+                AttentionType::Sliding, // 9
+                AttentionType::Sliding, // 10
+                AttentionType::Full,    // 11
+                AttentionType::Sliding, // 12
+                AttentionType::Sliding, // 13
+                AttentionType::Sliding, // 14
+                AttentionType::Sliding, // 15
+                AttentionType::Sliding, // 16
+                AttentionType::Full,    // 17
             ],
             query_pre_attn_scalar: Some(256.0),
             seed: None,
@@ -128,7 +128,8 @@ impl Module for Gemma3 {
         // Validate layer_types length
         assert_eq!(params.layer_types.len(), params.n_layers);
 
-        let token_embeddings = embedding::InitParams::new(params.vocab_size, params.emb_dim, params.seed).into();
+        let token_embeddings =
+            embedding::InitParams::new(params.vocab_size, params.emb_dim, params.seed).into();
 
         // Initialize final norm and output head
         let final_norm = rms_norm::InitParams::new(false, params.emb_dim, 1e-6).into();

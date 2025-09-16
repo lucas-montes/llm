@@ -1,6 +1,6 @@
+pub mod gemma;
 pub mod modules;
 pub mod tensor;
-pub mod gemma;
 
 mod config {
     use criterion::{BenchmarkGroup, Criterion, measurement::WallTime};
@@ -14,7 +14,7 @@ mod config {
     }
 
     pub fn set_default_benchmark_configs(benchmark: &mut BenchmarkGroup<WallTime>) {
-        let sample_size: usize = 1000;
+        let sample_size: usize = 10;
         let measurement_time: Duration = Duration::new(10, 0);
         let confidence_level: f64 = 0.97;
         let warm_up_time: Duration = Duration::new(10, 0);

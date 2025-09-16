@@ -456,96 +456,96 @@ impl Tensor {
     }
 
     pub fn masked_fill(&self, mask: &Tensor, value: f32) -> Result<Self, TensorError> {
-    if self.shape == mask.shape {
-        // Direct element-wise operation when shapes match
-        let data = self
-            .data
-            .iter()
-            .zip(mask.data.iter())
-            .map(|(x, m)| if *m != 0.0 { value } else { *x })
-            .collect();
-        Ok(Tensor {
-            data,
-            shape: self.shape.clone(),
-        })
-    } else {
-        // Use broadcasting when shapes don't match
-        let result_shape = self.shape.broadcast(&mask.shape)?;
-
-        // Ensure the result shape matches the larger tensor (self)
-        let final_shape = if result_shape.dims() == self.shape.dims() {
-            self.shape.clone()
+        if self.shape == mask.shape {
+            // Direct element-wise operation when shapes match
+            let data = self
+                .data
+                .iter()
+                .zip(mask.data.iter())
+                .map(|(x, m)| if *m != 0.0 { value } else { *x })
+                .collect();
+            Ok(Tensor {
+                data,
+                shape: self.shape.clone(),
+            })
         } else {
-            result_shape
-        };
+            // Use broadcasting when shapes don't match
+            let result_shape = self.shape.broadcast(&mask.shape)?;
 
-        let mut data = Vec::with_capacity(final_shape.num_elements());
+            // Ensure the result shape matches the larger tensor (self)
+            let final_shape = if result_shape.dims() == self.shape.dims() {
+                self.shape.clone()
+            } else {
+                result_shape
+            };
 
-        // Get dimensions for easier broadcasting
-        let self_dims = self.shape.dims();
-        let mask_dims = mask.shape.dims();
-        let out_dims = final_shape.dims();
+            let mut data = Vec::with_capacity(final_shape.num_elements());
 
-        // Calculate strides for efficient indexing
-        let self_strides = compute_strides(self_dims);
-        let mask_strides = compute_strides(mask_dims);
-        let out_strides = compute_strides(out_dims);
+            // Get dimensions for easier broadcasting
+            let self_dims = self.shape.dims();
+            let mask_dims = mask.shape.dims();
+            let out_dims = final_shape.dims();
 
-        for out_idx in 0..final_shape.num_elements() {
-            // Convert flat index to multi-dimensional indices
-            let out_indices = unravel_index(out_idx, &out_strides, out_dims);
+            // Calculate strides for efficient indexing
+            let self_strides = compute_strides(self_dims);
+            let mask_strides = compute_strides(mask_dims);
+            let out_strides = compute_strides(out_dims);
 
-            // Map to self indices (handle broadcasting)
-            let mut self_indices = Vec::with_capacity(self_dims.len());
-            let offset = out_dims.len() - self_dims.len();
-            for i in 0..self_dims.len() {
-                let out_idx = if i + offset < out_indices.len() {
-                    out_indices[i + offset]
-                } else {
-                    0
-                };
-                // Handle size-1 dimensions (broadcasting)
-                if self_dims[i] == 1 {
-                    self_indices.push(0);
-                } else {
-                    self_indices.push(out_idx);
+            for out_idx in 0..final_shape.num_elements() {
+                // Convert flat index to multi-dimensional indices
+                let out_indices = unravel_index(out_idx, &out_strides, out_dims);
+
+                // Map to self indices (handle broadcasting)
+                let mut self_indices = Vec::with_capacity(self_dims.len());
+                let offset = out_dims.len() - self_dims.len();
+                for i in 0..self_dims.len() {
+                    let out_idx = if i + offset < out_indices.len() {
+                        out_indices[i + offset]
+                    } else {
+                        0
+                    };
+                    // Handle size-1 dimensions (broadcasting)
+                    if self_dims[i] == 1 {
+                        self_indices.push(0);
+                    } else {
+                        self_indices.push(out_idx);
+                    }
                 }
+
+                // Map to mask indices (handle broadcasting)
+                let mut mask_indices = Vec::with_capacity(mask_dims.len());
+                let mask_offset = out_dims.len() - mask_dims.len();
+                for i in 0..mask_dims.len() {
+                    let out_idx = if i + mask_offset < out_indices.len() {
+                        out_indices[i + mask_offset]
+                    } else {
+                        0
+                    };
+                    // Handle size-1 dimensions (broadcasting)
+                    if mask_dims[i] == 1 {
+                        mask_indices.push(0);
+                    } else {
+                        mask_indices.push(out_idx);
+                    }
+                }
+
+                // Get flat indices
+                let self_flat_idx = ravel_index(&self_indices, &self_strides, self_dims);
+                let mask_flat_idx = ravel_index(&mask_indices, &mask_strides, mask_dims);
+
+                // Apply mask
+                let self_val = self.data[self_flat_idx];
+                let mask_val = mask.data[mask_flat_idx];
+
+                data.push(if mask_val != 0.0 { value } else { self_val });
             }
 
-            // Map to mask indices (handle broadcasting)
-            let mut mask_indices = Vec::with_capacity(mask_dims.len());
-            let mask_offset = out_dims.len() - mask_dims.len();
-            for i in 0..mask_dims.len() {
-                let out_idx = if i + mask_offset < out_indices.len() {
-                    out_indices[i + mask_offset]
-                } else {
-                    0
-                };
-                // Handle size-1 dimensions (broadcasting)
-                if mask_dims[i] == 1 {
-                    mask_indices.push(0);
-                } else {
-                    mask_indices.push(out_idx);
-                }
-            }
-
-            // Get flat indices
-            let self_flat_idx = ravel_index(&self_indices, &self_strides, self_dims);
-            let mask_flat_idx = ravel_index(&mask_indices, &mask_strides, mask_dims);
-
-            // Apply mask
-            let self_val = self.data[self_flat_idx];
-            let mask_val = mask.data[mask_flat_idx];
-
-            data.push(if mask_val != 0.0 { value } else { self_val });
+            Ok(Tensor {
+                data,
+                shape: final_shape,
+            })
         }
-
-        Ok(Tensor {
-            data,
-            shape: final_shape,
-        })
     }
-}
 
     pub fn data(&self) -> &[f32] {
         &self.data
