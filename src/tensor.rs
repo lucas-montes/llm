@@ -1,5 +1,5 @@
 use std::{
-    arch::x86_64::{__m128, _mm_load_ps, _mm_rsqrt_ps},
+    // arch::x86_64::{__m128, _mm_load_ps, _mm_rsqrt_ps},
     fmt,
     ops::{Add, Div, Mul, Sub},
 };
@@ -119,7 +119,7 @@ pub struct Tensor {
 }
 
 impl Tensor {
-     pub fn exp(&self) -> Result<Tensor, TensorError> {
+    pub fn exp(&self) -> Result<Tensor, TensorError> {
         let data = self.data.iter().map(|x| x.exp()).collect();
         Ok(Tensor {
             data,
@@ -127,7 +127,175 @@ impl Tensor {
         })
     }
 
-     pub fn softmax(&self, axis: isize) -> Result<Tensor, TensorError> {
+    // Helper function to iterate through all valid indices
+    fn extract_slice(
+        tensor: &Tensor,
+        ranges: &[std::ops::Range<usize>],
+        current_indices: &mut Vec<usize>,
+        dim: usize,
+        new_data: &mut Vec<f32>,
+    ) {
+        if dim == ranges.len() {
+            // Calculate flat index and extract value
+            let strides = compute_strides(tensor.shape().dims());
+            let idx: usize = current_indices
+                .iter()
+                .zip(strides.iter())
+                .map(|(i, s)| i * s)
+                .sum();
+            new_data.push(tensor.data()[idx]);
+            return;
+        }
+
+        for i in ranges[dim].clone() {
+            current_indices.push(i);
+            Self::extract_slice(tensor, ranges, current_indices, dim + 1, new_data);
+            current_indices.pop();
+        }
+    }
+
+    /// Slice a tensor along multiple dimensions
+    pub fn slice(&self, ranges: &[std::ops::Range<usize>]) -> Result<Tensor, TensorError> {
+        //TODO: test and improve
+        let dims = self.shape().dims();
+        assert_eq!(
+            ranges.len(),
+            dims.len(),
+            "Number of ranges must match tensor dimensions"
+        );
+
+        // Calculate new shape
+        let new_shape: Vec<usize> = ranges.iter().map(|r| r.end - r.start).collect();
+        let mut new_data = Vec::new();
+
+        let mut indices = Vec::new();
+        Self::extract_slice(self, ranges, &mut indices, 0, &mut new_data);
+
+        Ok(Tensor {
+            data: new_data,
+            shape: Shape::new(new_shape),
+        })
+    }
+
+    /// Add a dimension of size 1 at the specified position
+    pub fn unsqueeze(&self, dim: usize) -> Result<Tensor, TensorError> {
+        //TODO: test and improve
+        let mut new_shape = self.shape().dims().to_vec();
+        new_shape.insert(dim, 1);
+
+        Ok(Tensor {
+            data: self.data.clone(),
+            shape: Shape::new(new_shape),
+        })
+    }
+
+    /// Concatenate tensors along a dimension
+    pub fn cat(tensors: &[&Tensor], dim: isize) -> Result<Tensor, TensorError> {
+        //TODO: test and improve
+        if tensors.is_empty() {
+            return Err(TensorError::InvalidDataLength {
+                expected: 1,
+                found: 0,
+            });
+        }
+
+        let first_shape = tensors[0].shape().dims();
+        let ndim = first_shape.len();
+        let dim = if dim < 0 {
+            (ndim as isize + dim) as usize
+        } else {
+            dim as usize
+        };
+
+        // Verify all tensors have compatible shapes
+        for tensor in tensors.iter().skip(1) {
+            let shape = tensor.shape().dims();
+            if shape.len() != ndim {
+                return Err(TensorError::DimensionMismatch {
+                    expected: (ndim, ndim),
+                    found: (shape.len(), ndim),
+                });
+            }
+            for (i, (&d1, &d2)) in first_shape.iter().zip(shape.iter()).enumerate() {
+                if i != dim && d1 != d2 {
+                    return Err(TensorError::DimensionMismatch {
+                        expected: (d1, d1),
+                        found: (d2, d1),
+                    });
+                }
+            }
+        }
+
+        // Calculate output shape
+        let mut out_shape = first_shape.to_vec();
+        out_shape[dim] = tensors.iter().map(|t| t.shape().dims()[dim]).sum();
+
+        // Properly concatenate data along the specified dimension
+        let mut out_data = Vec::with_capacity(out_shape.iter().product());
+
+        // For the last dimension (most common case), we can optimize
+        if dim == ndim - 1 {
+            let outer_size = first_shape[..ndim - 1].iter().product::<usize>();
+            for outer_idx in 0..outer_size {
+                for tensor in tensors {
+                    let start = outer_idx * tensor.shape().dims()[dim];
+                    let end = start + tensor.shape().dims()[dim];
+                    out_data.extend_from_slice(&tensor.data()[start..end]);
+                }
+            }
+        } else {
+            // General case for other dimensions
+            let out_strides = compute_strides(&out_shape);
+
+            for out_idx in 0..out_shape.iter().product::<usize>() {
+                let out_indices = unravel_index(out_idx, &out_strides, &out_shape);
+
+                // Find which tensor this element comes from
+                let mut cumulative_size = 0;
+                let mut source_tensor_idx = 0;
+                let mut source_dim_idx = out_indices[dim];
+
+                for (i, tensor) in tensors.iter().enumerate() {
+                    let tensor_dim_size = tensor.shape().dims()[dim];
+                    if source_dim_idx < cumulative_size + tensor_dim_size {
+                        source_tensor_idx = i;
+                        source_dim_idx -= cumulative_size;
+                        break;
+                    }
+                    cumulative_size += tensor_dim_size;
+                }
+
+                // Build source indices
+                let mut source_indices = out_indices.clone();
+                source_indices[dim] = source_dim_idx;
+
+                let source_strides = compute_strides(tensors[source_tensor_idx].shape().dims());
+                let source_idx = ravel_index(
+                    &source_indices,
+                    &source_strides,
+                    tensors[source_tensor_idx].shape().dims(),
+                );
+
+                out_data.push(tensors[source_tensor_idx].data()[source_idx]);
+            }
+        }
+
+        Ok(Tensor {
+            data: out_data,
+            shape: Shape::new(out_shape),
+        })
+    }
+
+    /// Negate all elements
+    pub fn neg(&self) -> Tensor {
+        let data = self.data.iter().map(|x| -x).collect();
+        Tensor {
+            data,
+            shape: self.shape.clone(),
+        }
+    }
+
+    pub fn softmax(&self, axis: isize) -> Result<Tensor, TensorError> {
         let ndim = self.shape.0.len();
         let axis = if axis < 0 {
             (ndim as isize + axis) as usize
@@ -147,7 +315,7 @@ impl Tensor {
     }
 
     //TODO: test
-     pub fn max_dim(&self, axis: usize, keepdim: bool) -> Result<Tensor, TensorError> {
+    pub fn max_dim(&self, axis: usize, keepdim: bool) -> Result<Tensor, TensorError> {
         let shape = &self.shape.0;
         let mut out_shape = shape.clone();
         if keepdim {
@@ -206,7 +374,14 @@ impl Tensor {
         })
     }
 
-    pub fn new(dims: &[usize]) -> Self {
+    pub fn new(dims: &[usize], data: Vec<f32>) -> Self {
+        Self {
+            data,
+            shape: Shape::new(dims.to_vec()),
+        }
+    }
+
+    pub fn zero(dims: &[usize]) -> Self {
         let numel = dims.iter().product();
         Self {
             data: vec![Default::default(); numel],
@@ -266,24 +441,111 @@ impl Tensor {
         }
     }
 
-    pub fn masked_fill(&self, mask: &Tensor, value: f32) -> Result<Tensor, TensorError> {
-        if self.shape != mask.shape {
-            return Err(TensorError::DimensionMismatch {
-                expected: (self.shape.num_elements(), 1),
-                found: (mask.shape.num_elements(), 1),
-            });
+    pub fn mask(&self, other: &Tensor) -> Tensor {
+        let data: Vec<f32> = self
+            .data()
+            .iter()
+            .zip(other.data().iter())
+            .map(|(x, y)| if *x != 0.0 || *y != 0.0 { 1.0 } else { 0.0 })
+            .collect();
+
+        Tensor {
+            data,
+            shape: self.shape().clone(),
         }
+    }
+
+    pub fn masked_fill(&self, mask: &Tensor, value: f32) -> Result<Self, TensorError> {
+    if self.shape == mask.shape {
+        // Direct element-wise operation when shapes match
         let data = self
             .data
             .iter()
             .zip(mask.data.iter())
-            .map(|(x, m)| if *m != 0.0 { *x } else { value })
+            .map(|(x, m)| if *m != 0.0 { value } else { *x })
             .collect();
         Ok(Tensor {
             data,
             shape: self.shape.clone(),
         })
+    } else {
+        // Use broadcasting when shapes don't match
+        let result_shape = self.shape.broadcast(&mask.shape)?;
+
+        // Ensure the result shape matches the larger tensor (self)
+        let final_shape = if result_shape.dims() == self.shape.dims() {
+            self.shape.clone()
+        } else {
+            result_shape
+        };
+
+        let mut data = Vec::with_capacity(final_shape.num_elements());
+
+        // Get dimensions for easier broadcasting
+        let self_dims = self.shape.dims();
+        let mask_dims = mask.shape.dims();
+        let out_dims = final_shape.dims();
+
+        // Calculate strides for efficient indexing
+        let self_strides = compute_strides(self_dims);
+        let mask_strides = compute_strides(mask_dims);
+        let out_strides = compute_strides(out_dims);
+
+        for out_idx in 0..final_shape.num_elements() {
+            // Convert flat index to multi-dimensional indices
+            let out_indices = unravel_index(out_idx, &out_strides, out_dims);
+
+            // Map to self indices (handle broadcasting)
+            let mut self_indices = Vec::with_capacity(self_dims.len());
+            let offset = out_dims.len() - self_dims.len();
+            for i in 0..self_dims.len() {
+                let out_idx = if i + offset < out_indices.len() {
+                    out_indices[i + offset]
+                } else {
+                    0
+                };
+                // Handle size-1 dimensions (broadcasting)
+                if self_dims[i] == 1 {
+                    self_indices.push(0);
+                } else {
+                    self_indices.push(out_idx);
+                }
+            }
+
+            // Map to mask indices (handle broadcasting)
+            let mut mask_indices = Vec::with_capacity(mask_dims.len());
+            let mask_offset = out_dims.len() - mask_dims.len();
+            for i in 0..mask_dims.len() {
+                let out_idx = if i + mask_offset < out_indices.len() {
+                    out_indices[i + mask_offset]
+                } else {
+                    0
+                };
+                // Handle size-1 dimensions (broadcasting)
+                if mask_dims[i] == 1 {
+                    mask_indices.push(0);
+                } else {
+                    mask_indices.push(out_idx);
+                }
+            }
+
+            // Get flat indices
+            let self_flat_idx = ravel_index(&self_indices, &self_strides, self_dims);
+            let mask_flat_idx = ravel_index(&mask_indices, &mask_strides, mask_dims);
+
+            // Apply mask
+            let self_val = self.data[self_flat_idx];
+            let mask_val = mask.data[mask_flat_idx];
+
+            data.push(if mask_val != 0.0 { value } else { self_val });
+        }
+
+        Ok(Tensor {
+            data,
+            shape: final_shape,
+        })
     }
+}
 
     pub fn data(&self) -> &[f32] {
         &self.data
@@ -303,7 +565,7 @@ impl Tensor {
         }
     }
 
-    pub fn powf(&self, exp: f32) -> Tensor {
+    pub fn powf(&self, exp: f32) -> Self {
         let data = self.data.iter().map(|x| x.powf(exp)).collect();
         Tensor {
             data,
@@ -311,24 +573,81 @@ impl Tensor {
         }
     }
 
-    pub fn mean(&self, axis: Option<usize>) -> Tensor {
+    pub fn mean(&self, axis: Option<usize>, keepdim: bool) -> Result<Self, TensorError> {
         let shape = &self.shape.0;
-        if shape.len() == 2 && axis.is_none() {
-            let cols = shape[1] as f32;
-            let data = (0..shape[0])
-                .map(|i| {
-                    let start = i * shape[1];
-                    let end = start + shape[1];
-                    let row_sum: f32 = self.data[start..end].iter().sum();
-                    row_sum / cols
+
+        match axis {
+            None => {
+                // Mean of all elements
+                let sum: f32 = self.data.iter().sum();
+                let count = self.data.len() as f32;
+                let result_shape = if keepdim {
+                    vec![1; shape.len()] // Keep all dimensions as 1
+                } else {
+                    vec![1] // Scalar
+                };
+                Ok(Tensor {
+                    data: vec![sum / count],
+                    shape: Shape::new(result_shape),
                 })
-                .collect();
-            Tensor {
-                data,
-                shape: Shape::new(vec![shape[0], 1]),
             }
-        } else {
-            unimplemented!("mean for N-dim tensors and axis reduction");
+            Some(axis) => {
+                if axis >= shape.len() {
+                    return Err(TensorError::DimensionMismatch {
+                        expected: (shape.len(), axis),
+                        found: (shape.len(), axis),
+                    });
+                }
+
+                // Create output shape
+                let mut out_shape = shape.clone();
+                let axis_size = out_shape[axis];
+
+                if keepdim {
+                    out_shape[axis] = 1; // Keep dimension as 1
+                } else {
+                    out_shape.remove(axis); // Remove dimension
+                    if out_shape.is_empty() {
+                        out_shape = vec![1]; // Keep at least 1D
+                    }
+                }
+
+                let out_size = out_shape.iter().product::<usize>();
+                let mut out_data = vec![0.0; out_size];
+
+                let strides = compute_strides(shape);
+                let out_strides = compute_strides(&out_shape);
+
+                // Accumulate values
+                for idx in 0..self.data.len() {
+                    let indices = unravel_index(idx, &strides, shape);
+
+                    let mut out_indices = indices.clone();
+                    if keepdim {
+                        out_indices[axis] = 0; // Map to 0 in the reduced dimension
+                    } else {
+                        out_indices.remove(axis);
+                    }
+
+                    let out_idx = if out_indices.is_empty() {
+                        0
+                    } else {
+                        ravel_index(&out_indices, &out_strides, &out_shape)
+                    };
+
+                    out_data[out_idx] += self.data[idx];
+                }
+
+                // Divide by axis size to get mean
+                for val in &mut out_data {
+                    *val /= axis_size as f32;
+                }
+
+                Ok(Tensor {
+                    data: out_data,
+                    shape: Shape::new(out_shape),
+                })
+            }
         }
     }
 
@@ -377,7 +696,7 @@ impl Tensor {
     }
 
     pub fn view(&self, dims: &[usize]) -> Result<Tensor, TensorError> {
-        let total = dims.iter().product();
+        let total = dims.iter().product(); //TODO: maybe this isn't correct after all
         if total != self.data.len() {
             return Err(TensorError::InvalidDataLength {
                 expected: total,
@@ -456,8 +775,11 @@ impl Tensor {
     pub fn matmul(&self, other: &Tensor) -> Result<Tensor, TensorError> {
         let a_shape = &self.shape.0;
         let b_shape = &other.shape.0;
-        match (a_shape.len(), b_shape.len()) {
-            // 1D x 1D: dot product
+        let a_ndim = a_shape.len();
+        let b_ndim = b_shape.len();
+
+        match (a_ndim, b_ndim) {
+            // Case 1: Both 1D - dot product, result is scalar
             (1, 1) => {
                 if a_shape[0] != b_shape[0] {
                     return Err(TensorError::InvalidMatrixMultiplication {
@@ -468,10 +790,63 @@ impl Tensor {
                 let dot: f32 = self.data.iter().zip(&other.data).map(|(a, b)| a * b).sum();
                 Ok(Tensor {
                     data: vec![dot],
-                    shape: Shape::new(vec![1]),
+                    shape: Shape::new(vec![]), // Scalar - empty shape like PyTorch
                 })
             }
-            // 2D x 2D: matrix multiplication
+
+            // Case 2: 1D × 2D - prepend 1 to first, remove it from result
+            // [n] × [n, m] -> [1, n] × [n, m] -> [1, m] -> [m]
+            (1, 2) => {
+                if a_shape[0] != b_shape[0] {
+                    return Err(TensorError::InvalidMatrixMultiplication {
+                        left_cols: a_shape[0],
+                        right_rows: b_shape[0],
+                    });
+                }
+                let (k, n) = (b_shape[0], b_shape[1]);
+                let mut data = vec![0.0; n];
+
+                for j in 0..n {
+                    let mut sum = 0.0;
+                    for k_idx in 0..k {
+                        sum += self.data[k_idx] * other.data[k_idx * n + j];
+                    }
+                    data[j] = sum;
+                }
+
+                Ok(Tensor {
+                    data,
+                    shape: Shape::new(vec![n]),
+                })
+            }
+
+            // Case 3: 2D × 1D - append 1 to second, remove it from result
+            // [m, n] × [n] -> [m, n] × [n, 1] -> [m, 1] -> [m]
+            (2, 1) => {
+                let (m, k) = (a_shape[0], a_shape[1]);
+                if k != b_shape[0] {
+                    return Err(TensorError::InvalidMatrixMultiplication {
+                        left_cols: k,
+                        right_rows: b_shape[0],
+                    });
+                }
+
+                let mut data = vec![0.0; m];
+                for i in 0..m {
+                    let mut sum = 0.0;
+                    for k_idx in 0..k {
+                        sum += self.data[i * k + k_idx] * other.data[k_idx];
+                    }
+                    data[i] = sum;
+                }
+
+                Ok(Tensor {
+                    data,
+                    shape: Shape::new(vec![m]),
+                })
+            }
+
+            // Case 4: 2D × 2D - standard matrix multiplication
             (2, 2) => {
                 let (m, k1) = (a_shape[0], a_shape[1]);
                 let (k2, n) = (b_shape[0], b_shape[1]);
@@ -481,6 +856,7 @@ impl Tensor {
                         right_rows: k2,
                     });
                 }
+
                 let mut data = vec![0.0; m * n];
                 for i in 0..m {
                     for j in 0..n {
@@ -496,79 +872,180 @@ impl Tensor {
                     shape: Shape::new(vec![m, n]),
                 })
             }
-            // Batched matmul: N-D tensors
+
+            // Case 5: 1D × ND (N > 2) - prepend 1, remove after
+            // [k] × [..., k, n] -> [1, k] × [..., k, n] -> [..., 1, n] -> [..., n]
+            (1, b_ndim) if b_ndim > 2 => {
+                let k = a_shape[0];
+                if k != b_shape[b_ndim - 2] {
+                    return Err(TensorError::InvalidMatrixMultiplication {
+                        left_cols: k,
+                        right_rows: b_shape[b_ndim - 2],
+                    });
+                }
+
+                let n = b_shape[b_ndim - 1];
+                let batch_dims = &b_shape[..b_ndim - 2];
+                let batch_size: usize = batch_dims.iter().product();
+
+                let mut data = vec![0.0; batch_size * n];
+
+                for batch_idx in 0..batch_size {
+                    let b_batch_offset = batch_idx * k * n;
+                    let out_batch_offset = batch_idx * n;
+
+                    for j in 0..n {
+                        let mut sum = 0.0;
+                        for k_idx in 0..k {
+                            sum += self.data[k_idx] * other.data[b_batch_offset + k_idx * n + j];
+                        }
+                        data[out_batch_offset + j] = sum;
+                    }
+                }
+
+                let mut output_shape = batch_dims.to_vec();
+                output_shape.push(n);
+                Ok(Tensor {
+                    data,
+                    shape: Shape::new(output_shape),
+                })
+            }
+
+            // Case 6: ND × 1D (N > 2) - append 1, remove after
+            // [..., m, k] × [k] -> [..., m, k] × [k, 1] -> [..., m, 1] -> [..., m]
+            (a_ndim, 1) if a_ndim > 2 => {
+                let k = b_shape[0];
+                let m = a_shape[a_ndim - 2];
+                if a_shape[a_ndim - 1] != k {
+                    return Err(TensorError::InvalidMatrixMultiplication {
+                        left_cols: a_shape[a_ndim - 1],
+                        right_rows: k,
+                    });
+                }
+
+                let batch_dims = &a_shape[..a_ndim - 2];
+                let batch_size: usize = batch_dims.iter().product();
+
+                let mut data = vec![0.0; batch_size * m];
+
+                for batch_idx in 0..batch_size {
+                    let a_batch_offset = batch_idx * m * k;
+                    let out_batch_offset = batch_idx * m;
+
+                    for i in 0..m {
+                        let mut sum = 0.0;
+                        for k_idx in 0..k {
+                            sum += self.data[a_batch_offset + i * k + k_idx] * other.data[k_idx];
+                        }
+                        data[out_batch_offset + i] = sum;
+                    }
+                }
+
+                let output_shape = batch_dims.to_vec();
+                Ok(Tensor {
+                    data,
+                    shape: Shape::new(output_shape),
+                })
+            }
+
+            // Case 7: General ND × MD batched matmul (both N,M >= 2)
             (a_ndim, b_ndim) if a_ndim >= 2 && b_ndim >= 2 => {
-                // Broadcast batch dimensions
-                let a_batch = &a_shape[..a_ndim - 2];
-                let b_batch = &b_shape[..b_ndim - 2];
-                let batch_shape = Shape::new(a_batch.to_vec())
-                    .broadcast(&Shape::new(b_batch.to_vec()))?
-                    .0;
+                // Get matrix dimensions (last 2 dimensions)
                 let (m, k1) = (a_shape[a_ndim - 2], a_shape[a_ndim - 1]);
                 let (k2, n) = (b_shape[b_ndim - 2], b_shape[b_ndim - 1]);
+
                 if k1 != k2 {
                     return Err(TensorError::InvalidMatrixMultiplication {
                         left_cols: k1,
                         right_rows: k2,
                     });
                 }
-                let batch_size = batch_shape.iter().product::<usize>();
+
+                // Broadcast batch dimensions using existing broadcast logic
+                let a_batch_dims = &a_shape[..a_ndim - 2];
+                let b_batch_dims = &b_shape[..b_ndim - 2];
+
+                let batch_shape = if a_batch_dims.is_empty() && b_batch_dims.is_empty() {
+                    vec![]
+                } else if a_batch_dims.is_empty() {
+                    b_batch_dims.to_vec()
+                } else if b_batch_dims.is_empty() {
+                    a_batch_dims.to_vec()
+                } else {
+                    Shape::new(a_batch_dims.to_vec())
+                        .broadcast(&Shape::new(b_batch_dims.to_vec()))?
+                        .0
+                };
+
+                let batch_size = if batch_shape.is_empty() {
+                    1
+                } else {
+                    batch_shape.iter().product()
+                };
+                let a_batch_size: usize = if a_batch_dims.is_empty() {
+                    1
+                } else {
+                    a_batch_dims.iter().product()
+                };
+                let b_batch_size: usize = if b_batch_dims.is_empty() {
+                    1
+                } else {
+                    b_batch_dims.iter().product()
+                };
+
                 let mut data = vec![0.0; batch_size * m * n];
-                let a_strides = compute_strides(a_shape);
-                let b_strides = compute_strides(b_shape);
-                let out_strides = compute_strides(&[batch_shape.clone(), vec![m, n]].concat());
+
+                // Perform batched matrix multiplication
                 for batch_idx in 0..batch_size {
-                    let batch_indices =
-                        unravel_index(batch_idx, &compute_strides(&batch_shape), &batch_shape);
-                    // Find corresponding indices in a and b (broadcasted)
-                    let mut a_batch_indices = vec![0; a_batch.len()];
-                    let mut b_batch_indices = vec![0; b_batch.len()];
-                    for i in 0..batch_shape.len() {
-                        a_batch_indices[i] = if i < a_batch.len() && a_batch[i] == 1 {
-                            0
-                        } else {
-                            batch_indices[i]
-                        };
-                        b_batch_indices[i] = if i < b_batch.len() && b_batch[i] == 1 {
-                            0
-                        } else {
-                            batch_indices[i]
-                        };
-                    }
+                    // Handle broadcasting for batch indices
+                    let a_batch_idx = if a_batch_size == 1 {
+                        0
+                    } else if a_batch_size == batch_size {
+                        batch_idx
+                    } else {
+                        // More complex broadcasting - map batch_idx to appropriate a_batch_idx
+                        batch_idx % a_batch_size
+                    };
+
+                    let b_batch_idx = if b_batch_size == 1 {
+                        0
+                    } else if b_batch_size == batch_size {
+                        batch_idx
+                    } else {
+                        // More complex broadcasting - map batch_idx to appropriate b_batch_idx
+                        batch_idx % b_batch_size
+                    };
+
+                    let a_batch_offset = a_batch_idx * m * k1;
+                    let b_batch_offset = b_batch_idx * k2 * n;
+                    let out_batch_offset = batch_idx * m * n;
+
+                    // Standard 2D matrix multiplication for this batch
                     for i in 0..m {
                         for j in 0..n {
                             let mut sum = 0.0;
                             for k in 0..k1 {
-                                // Build full index for a: [a_batch..., i, k]
-                                let mut a_idx = a_batch_indices.clone();
-                                a_idx.push(i);
-                                a_idx.push(k);
-                                let a_flat = ravel_index(&a_idx, &a_strides, a_shape);
-                                // Build full index for b: [b_batch..., k, j]
-                                let mut b_idx = b_batch_indices.clone();
-                                b_idx.push(k);
-                                b_idx.push(j);
-                                let b_flat = ravel_index(&b_idx, &b_strides, b_shape);
-                                sum += self.data[a_flat] * other.data[b_flat];
+                                let a_idx = a_batch_offset + i * k1 + k;
+                                let b_idx = b_batch_offset + k * n + j;
+                                sum += self.data[a_idx] * other.data[b_idx];
                             }
-                            // Output index: [batch..., i, j]
-                            let mut out_idx = batch_indices.clone();
-                            out_idx.push(i);
-                            out_idx.push(j);
-                            let out_flat = ravel_index(
-                                &out_idx,
-                                &out_strides,
-                                &[batch_shape.clone(), vec![m, n]].concat(),
-                            );
-                            data[out_flat] = sum;
+                            let out_idx = out_batch_offset + i * n + j;
+                            data[out_idx] = sum;
                         }
                     }
                 }
+
+                // Construct output shape: batch_dims + [m, n]
+                let mut output_shape = batch_shape;
+                output_shape.extend_from_slice(&[m, n]);
+
                 Ok(Tensor {
                     data,
-                    shape: Shape::new([batch_shape, vec![m, n]].concat()),
+                    shape: Shape::new(output_shape),
                 })
             }
+
+            // Invalid cases
             _ => Err(TensorError::InvalidMatrixMultiplication {
                 left_cols: *a_shape.last().unwrap_or(&0),
                 right_rows: *b_shape.first().unwrap_or(&0),
@@ -837,23 +1314,15 @@ impl fmt::Debug for Tensor {
     }
 }
 
-fn reciprocal_sqrt(values: [f32; 4]) -> [f32; 4] {
-    unsafe {
-        let input: __m128 = std::mem::transmute(values);
-        let result: __m128 = _mm_rsqrt_ps(input);
-        std::mem::transmute(result)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_new_tensor() {
-        println!("Tensor: {:?}", Tensor::new(&[0, 3]));
-
-        println!("Tensor: {:?}", Tensor::new(&[3, 2]));
+    fn test_zero_tensor() {
+        let a = Tensor::zero(&[3, 2]);
+        assert_eq!(a.shape(), &Shape::new(vec![3, 2]));
+        assert_eq!(a.data(), &[0.0; 6]);
     }
 
     #[test]
@@ -888,7 +1357,52 @@ mod tests {
     fn test_mean() {
         let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
 
-        assert_eq!(a.mean(None), Tensor::from([[1.5], [3.5]]));
+        assert_eq!(a.mean(None, false).unwrap(), Tensor::from([2.5]));
+    }
+
+    #[test]
+    fn test_mean_axis() -> Result<(), TensorError> {
+        let a = Tensor::from([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]);
+        // Shape: [2, 2, 2]
+
+        // Mean along axis 0: [2, 2]
+        let result = a.mean(Some(0), false)?;
+        let expected = Tensor::from([[3.0, 4.0], [5.0, 6.0]]);
+        assert_eq!(result, expected);
+
+        // Mean along axis 1: [2, 2]
+        let result = a.mean(Some(1), false)?;
+        let expected = Tensor::from([[2.0, 3.0], [6.0, 7.0]]);
+        assert_eq!(result, expected);
+
+        // Mean along axis 2: [2, 2]
+        let result = a.mean(Some(2), false)?;
+        let expected = Tensor::from([[1.5, 3.5], [5.5, 7.5]]);
+        assert_eq!(result, expected);
+
+        // Mean of all elements: scalar
+        let result = a.mean(None, false)?;
+        let expected = Tensor::from([4.5]);
+        assert_eq!(result, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mean_keepdim() -> Result<(), TensorError> {
+        let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
+
+        // Mean along axis 0 with keepdim
+        let result = a.mean(Some(0), true)?;
+        let expected = Tensor::from([[2.0, 3.0]]); // Shape: [1, 2]
+        assert_eq!(result, expected);
+
+        // Mean along axis 1 with keepdim
+        let result = a.mean(Some(1), true)?;
+        let expected = Tensor::from([[1.5], [3.5]]); // Shape: [2, 1]
+        assert_eq!(result, expected);
+
+        Ok(())
     }
 
     #[test]
@@ -1069,8 +1583,224 @@ mod tests {
         let a = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
         let mask = Tensor::from([[0.0, 1.0], [1.0, 0.0]]);
         let result = a.masked_fill(&mask, -1.0).unwrap();
-        let expected = Tensor::from([[-1.0, 2.0], [3.0, -1.0]]);
+        let expected = Tensor::from([[1.0, -1.0], [-1.0, 4.0]]);
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_masked_fill_basic() {
+        // Basic masked_fill with boolean-like mask
+        let scores = Tensor::from([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]);
+
+        let mask = Tensor::from([
+            [1.0, 0.0, 1.0], // True, False, True
+            [0.0, 1.0, 0.0], // False, True, False
+            [1.0, 0.0, 1.0], // True, False, True
+        ]);
+
+        // Apply masked_fill: where mask is non-zero, fill with f32::NEG_INFINITY
+        let result = scores.masked_fill(&mask, f32::NEG_INFINITY).unwrap();
+        let expected = Tensor::from([
+            [f32::NEG_INFINITY, 2.0, f32::NEG_INFINITY],
+            [4.0, f32::NEG_INFINITY, 6.0],
+            [f32::NEG_INFINITY, 8.0, f32::NEG_INFINITY],
+        ]);
+
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_masked_fill_causal_attention() {
+        // Causal attention masking (from PyTorch notebook)
+        let attn_scores = Tensor::from([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]);
+
+        // Create causal mask (upper triangular) - masks future tokens
+        let ones = Tensor::ones(&[3, 3]);
+        let mask_global = ones.triu(1); // diagonal=1 means mask upper triangle
+
+        let masked_scores = attn_scores
+            .masked_fill(&mask_global, f32::NEG_INFINITY)
+            .unwrap();
+        let expected = Tensor::from([
+            [1.0, f32::NEG_INFINITY, f32::NEG_INFINITY],
+            [4.0, 5.0, f32::NEG_INFINITY],
+            [7.0, 8.0, 9.0],
+        ]);
+
+        assert_eq!(masked_scores, expected);
+    }
+
+    #[test]
+    fn test_masked_fill_sliding_window() {
+        // Sliding window attention
+        let sliding_window = 2;
+        let seq_len = 5;
+
+        let ones = Tensor::ones(&[seq_len, seq_len]);
+
+        // Future mask (causal)
+        let mask_global = ones.triu(1);
+
+        // Far past mask (beyond sliding window)
+        // This creates a mask for positions too far in the past
+        let far_past = ones.triu(sliding_window as isize).transpose(0, 1);
+
+        // Combined local mask using logical OR
+        let mask_local = &mask_global.mask(&far_past); // Using your mask function as OR
+
+        let scores = Tensor::from([
+            [1.0, 2.0, 3.0, 4.0, 5.0],
+            [6.0, 7.0, 8.0, 9.0, 10.0],
+            [11.0, 12.0, 13.0, 14.0, 15.0],
+            [16.0, 17.0, 18.0, 19.0, 20.0],
+            [21.0, 22.0, 23.0, 24.0, 25.0],
+        ]);
+
+        let masked_scores = scores.masked_fill(&mask_local, f32::NEG_INFINITY).unwrap();
+
+        // Verify the pattern: each position can only attend to recent past within window
+        assert_eq!(masked_scores.data()[0], 1.0); // [0,0] - can attend to self
+        assert_eq!(masked_scores.data()[1], f32::NEG_INFINITY); // [0,1] - future masked
+        assert_eq!(masked_scores.data()[6], 7.0); // [1,1] - can attend to self
+        assert_eq!(masked_scores.data()[7], f32::NEG_INFINITY); // [1,2] - future masked
+    }
+
+    #[test]
+    fn test_masked_fill_different_values() {
+        // Fill with different values
+        let data = Tensor::from([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]);
+
+        let mask = Tensor::from([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]);
+
+        // Fill with zero
+        let result1 = data.masked_fill(&mask, 0.0).unwrap();
+        let expected1 = Tensor::from([[0.0, 2.0, 0.0], [4.0, 0.0, 6.0]]);
+        assert_eq!(result1, expected1);
+
+        // Fill with -999
+        let result2 = data.masked_fill(&mask, -999.0).unwrap();
+        let expected2 = Tensor::from([[-999.0, 2.0, -999.0], [4.0, -999.0, 6.0]]);
+        assert_eq!(result2, expected2);
+
+        // Fill with NaN
+        let result3 = data.masked_fill(&mask, f32::NAN).unwrap();
+        // For NaN comparison, check each element individually
+        assert!(result3.data()[0].is_nan());
+        assert_eq!(result3.data()[1], 2.0);
+        assert!(result3.data()[2].is_nan());
+        assert_eq!(result3.data()[3], 4.0);
+        assert!(result3.data()[4].is_nan());
+        assert_eq!(result3.data()[5], 6.0);
+    }
+
+    #[test]
+    fn test_masked_fill_broadcasting() {
+        // Broadcasting with different shapes (like attention scores)
+        let batch_size = 2;
+        let num_heads = 4;
+        let seq_len = 3;
+
+        // Attention scores: [batch, heads, seq_len, seq_len]
+        let scores = Tensor::ones(&[batch_size, num_heads, seq_len, seq_len]);
+
+        // Mask is only [seq_len, seq_len] - should be broadcasted
+        let mask = Tensor::from([
+            [0.0, 1.0, 1.0], // Can attend to position 0, mask 1,2
+            [0.0, 0.0, 1.0], // Can attend to 0,1, mask 2
+            [0.0, 0.0, 0.0], // Can attend to 0,1,2
+        ]);
+
+        let masked_scores = scores.masked_fill(&mask, f32::NEG_INFINITY).unwrap();
+
+        let expecterd = Tensor::from([
+            [
+                [
+                    [1., f32::NEG_INFINITY, f32::NEG_INFINITY],
+                    [1., 1., f32::NEG_INFINITY],
+                    [1., 1., 1.],
+                ],
+                [
+                    [1., f32::NEG_INFINITY, f32::NEG_INFINITY],
+                    [1., 1., f32::NEG_INFINITY],
+                    [1., 1., 1.],
+                ],
+                [
+                    [1., f32::NEG_INFINITY, f32::NEG_INFINITY],
+                    [1., 1., f32::NEG_INFINITY],
+                    [1., 1., 1.],
+                ],
+                [
+                    [1., f32::NEG_INFINITY, f32::NEG_INFINITY],
+                    [1., 1., f32::NEG_INFINITY],
+                    [1., 1., 1.],
+                ],
+            ],
+            [
+                [
+                    [1., f32::NEG_INFINITY, f32::NEG_INFINITY],
+                    [1., 1., f32::NEG_INFINITY],
+                    [1., 1., 1.],
+                ],
+                [
+                    [1., f32::NEG_INFINITY, f32::NEG_INFINITY],
+                    [1., 1., f32::NEG_INFINITY],
+                    [1., 1., 1.],
+                ],
+                [
+                    [1., f32::NEG_INFINITY, f32::NEG_INFINITY],
+                    [1., 1., f32::NEG_INFINITY],
+                    [1., 1., 1.],
+                ],
+                [
+                    [1., f32::NEG_INFINITY, f32::NEG_INFINITY],
+                    [1., 1., f32::NEG_INFINITY],
+                    [1., 1., 1.],
+                ],
+            ],
+        ]);
+        assert_eq!(masked_scores, expecterd);
+    }
+
+    #[test]
+    fn test_masked_fill_all_true_mask() {
+        let all_true_mask = Tensor::ones(&[3, 3]);
+
+        let attn_scores = Tensor::from([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]);
+
+        let masked_scores = attn_scores
+            .masked_fill(&all_true_mask, f32::NEG_INFINITY)
+            .unwrap();
+
+        let expected = Tensor::from([
+            [f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY],
+            [f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY],
+            [f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY],
+        ]);
+        assert_eq!(masked_scores, expected);
+    }
+
+    #[test]
+    fn test_masked_fill_all_false_mask() {
+        // Test with all False mask (all zeros)
+        let all_false_mask = Tensor::zero(&[3, 3]);
+
+        let attn_scores = Tensor::from([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]);
+
+        let masked_scores = attn_scores
+            .masked_fill(&all_false_mask, f32::NEG_INFINITY)
+            .unwrap();
+
+        // All values should remain unchanged since mask is all False
+        assert_eq!(masked_scores, attn_scores);
+    }
+
+    #[test]
+    fn test_masked_fill_shape_mismatch_error() {
+        let scores = Tensor::ones(&[2, 3]);
+        let wrong_mask = Tensor::ones(&[3, 4]); // Wrong shape
+
+        let result = scores.masked_fill(&wrong_mask, -1.0);
+        assert!(result.is_err()); // Should fail due to incompatible shapes
     }
 
     #[test]

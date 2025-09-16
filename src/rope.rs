@@ -6,55 +6,126 @@ pub struct Rope {
 }
 
 impl Rope {
-    pub fn new(head_dim: usize, theta_base: f32, context_length: usize)->Self{
+    pub fn new(head_dim: usize, theta_base: f32, context_length: usize) -> Self {
         assert!(head_dim % 2 == 0, "Embedding dimension must be even");
 
-    // Compute the inverse frequencies
-    let inv_freq: Vec<_> = (0..head_dim)
-        .step_by(2)
-        .take(head_dim / 2)
-        .map(|i| 1.0 / theta_base.powf(i as f32 / head_dim as f32))
-        .collect();
+        // Compute the inverse frequencies
+        let inv_freq: Vec<_> = (0..head_dim)
+            .step_by(2)
+            .take(head_dim / 2)
+            .map(|i| 1.0 / theta_base.powf(i as f32 / head_dim as f32))
+            .collect();
 
-    vec![vec![0.0; head_dim]; context_length];
+        // vec![vec![0.0; head_dim]; context_length];
 
-    //TODO: try to iter over the inv_freq without collecting. Loop over context_length and set the values
+        //TODO: try to iter over the inv_freq without collecting. Loop over context_length and set the values
 
-    let mut cos = Vec::with_capacity(context_length);
-    let mut sin = Vec::with_capacity(context_length);
+        let mut cos = Vec::with_capacity(context_length);
+        let mut sin = Vec::with_capacity(context_length);
 
-    for i in 0..context_length {
-        let mut cos_temp = vec![0.0; head_dim / 2];
-        let mut sin_temp = vec![0.0; head_dim / 2];
+        for i in 0..context_length {
+            let mut cos_temp = vec![0.0; head_dim / 2];
+            let mut sin_temp = vec![0.0; head_dim / 2];
 
-        for (h, &freq) in inv_freq.iter().enumerate() {
-            let angle = i as f32 * freq;
-            cos_temp[h] = angle.cos();
-            sin_temp[h] = angle.sin();
+            for (h, &freq) in inv_freq.iter().enumerate() {
+                let angle = i as f32 * freq;
+                cos_temp[h] = angle.cos();
+                sin_temp[h] = angle.sin();
+            }
+
+            cos_temp.extend_from_within(..);
+            sin_temp.extend_from_within(..);
+
+            cos.push(cos_temp);
+            sin.push(sin_temp);
         }
 
-        cos_temp.extend_from_within(..);
-        sin_temp.extend_from_within(..);
-
-        cos.push(cos_temp);
-        sin.push(sin_temp);
-    }
-
-    Self {
-        cos: Tensor::from(cos),
-        sin: Tensor::from(sin),
-    }
+        Self {
+            cos: Tensor::from(cos),
+            sin: Tensor::from(sin),
+        }
     }
 
     pub fn apply(&self, x: &Tensor) -> Tensor {
-        todo!()
+        let dims = x.shape().dims();
+        let seq_len = dims[2];
+        let head_dim = dims[3];
+
+        // Extract cos and sin for current sequence
+        let cos = self
+            .cos
+            .slice(&[0..seq_len, 0..head_dim])
+            .unwrap()
+            .unsqueeze(0)
+            .unwrap()
+            .unsqueeze(0)
+            .unwrap();
+        let sin = self
+            .sin
+            .slice(&[0..seq_len, 0..head_dim])
+            .unwrap()
+            .unsqueeze(0)
+            .unwrap()
+            .unsqueeze(0)
+            .unwrap();
+
+        // Split into halves
+        let x1 = x
+            .slice(&[0..dims[0], 0..dims[1], 0..dims[2], 0..(head_dim / 2)])
+            .unwrap();
+        let x2 = x
+            .slice(&[0..dims[0], 0..dims[1], 0..dims[2], (head_dim / 2)..head_dim])
+            .unwrap();
+
+        // Create rotated tensor: [-x2, x1]
+        let neg_x2 = x2.neg();
+        let rotated = Tensor::cat(&[&neg_x2, &x1], -1).unwrap();
+
+        // Apply rotation: x * cos + rotated * sin
+        let x_cos = (x * &cos).unwrap();
+        let rotated_sin = (&rotated * &sin).unwrap();
+
+        (&x_cos + &rotated_sin).unwrap()
     }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_apply_rope() {
+        let rope = Rope::new(4, 10000.0, 3);
+
+        let x = Tensor::from([[
+            [
+                [1.0, 2.0, 3.0, 4.0],
+                [5.0, 6.0, 7.0, 8.0],
+                [9.0, 10.0, 11.0, 12.0],
+            ],
+            [
+                [2.0, 4.0, 6.0, 8.0],
+                [10.0, 12.0, 14.0, 16.0],
+                [18.0, 20.0, 22.0, 24.0],
+            ],
+        ]]);
+
+        let result = rope.apply(&x);
+        let expected = Tensor::from([[
+            [
+                [1.0000, 2.0000, 3.0000, 4.0000],
+                [-3.1887855530, 5.9197015762, 7.9894704819, 8.0595989227],
+                [-13.7475929260, 9.7580165863, 3.6060614586, 12.1975870132],
+            ],
+            [
+                [2.0000000000, 4.0000000000, 6.0000000000, 8.0000000000],
+                [-6.3775711060, 11.8394031525, 15.9789409637, 16.1191978455],
+                [-27.4951858521, 19.5160331726, 7.2121229172, 24.3951740265],
+            ],
+        ]]);
+
+        assert_eq!(result, expected);
+    }
 
     #[test]
     fn test_compute_rope() {

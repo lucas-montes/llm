@@ -20,7 +20,7 @@
         pkgs = import nixpkgs {
           inherit system overlays;
         };
-        rust-bin-custom = pkgs.rust-bin.stable.latest.default.override {
+        rust-bin-custom = pkgs.rust-bin.stable."1.88.0".default.override {
           extensions = ["rust-src"];
         };
       in {
@@ -43,6 +43,21 @@
           buildInputs = [
             pkgs.pkg-config
             rust-bin-custom
+
+            # Debugging tools
+            pkgs.lldb # LLDB debugger (works with CodeLLDB extension)
+            pkgs.gdb # GDB debugger (alternative)
+            pkgs.valgrind # Memory debugging
+
+            # Development tools
+            pkgs.strace # System call tracing
+            pkgs.ltrace # Library call tracing
+            pkgs.perf-tools # Performance profiling
+            pkgs.flamegraph # Flamegraph generation for benchmarks
+
+            # Optional: more debugging utilities
+            pkgs.rr # Record and replay debugger
+            pkgs.heaptrack # Heap memory profiler
           ];
         };
       }

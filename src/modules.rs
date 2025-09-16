@@ -31,10 +31,14 @@ pub struct Mask{
 }
 
 impl Mask {
-    pub fn new(seq_len: usize) -> Self {
-        let global = Tensor::ones(&[seq_len, seq_len]);
-        let local = Tensor::new(&[seq_len, seq_len]);
-        todo!();
+    pub fn new(seq_len: usize, sliding_window: isize) -> Self {
+        let ones = Tensor::ones(&[seq_len, seq_len]);
+
+        let global = ones.triu(1);
+
+        let far_past = global.triu(sliding_window).transpose(0, 1);
+
+        let local = global.mask(&far_past);
         Self { global, local }
     }
 
@@ -45,6 +49,7 @@ impl Mask {
     pub fn local(&self) -> &Tensor {
         &self.local
     }
+
 }
 
 pub enum AttentionType {

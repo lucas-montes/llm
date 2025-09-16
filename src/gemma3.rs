@@ -1,28 +1,12 @@
 use crate::{
+    embedding::{self, Embedding},
     linear::{self, Linear},
     modules::{AttentionType, Mask, Module},
     rms_norm::{self, RMSNorm},
+    rope::Rope,
     tensor::Tensor,
     transformer_block::TransformerBlock,
 };
-
-use super::rope::Rope;
-
-pub struct Gemma3 {
-    // token_embeddings
-    // blocks: Vec<TransformerBlock>,
-    // blocks: Vec<crate::transformer_block::InitParams>,
-    final_norm: RMSNorm,
-    out_head: Linear,
-    // emb_dim: usize,
-    params: InitParams,
-}
-
-impl From<InitParams> for Gemma3 {
-    fn from(params: InitParams) -> Self {
-        Self::init(params)
-    }
-}
 
 pub struct InitParams {
     vocab_size: usize,
@@ -46,37 +30,37 @@ pub struct InitParams {
 impl InitParams {
     pub fn gemma3_270m() -> Self {
         Self {
-            vocab_size: 44,
-            context_length: 8,
-            emb_dim: 4,
+            vocab_size: 262_144,
+            context_length: 32_768,
+            emb_dim: 640,
             n_heads: 4,
             n_layers: 18,
-            hidden_dim: 8,
-            head_dim: 8,
+            hidden_dim: 2048,
+            head_dim: 256,
             qk_norm: true,
             n_kv_groups: 1,
             rope_local_base: 10_000.0,
             rope_base: 1_000_000.0,
             sliding_window: 512,
             layer_types: vec![
-                AttentionType::Sliding,
-                AttentionType::Sliding,
-                AttentionType::Sliding,
-                AttentionType::Sliding,
-                AttentionType::Sliding,
-                AttentionType::Full,
-                AttentionType::Sliding,
-                AttentionType::Sliding,
-                AttentionType::Sliding,
-                AttentionType::Sliding,
-                AttentionType::Sliding,
-                AttentionType::Full,
-                AttentionType::Sliding,
-                AttentionType::Sliding,
-                AttentionType::Sliding,
-                AttentionType::Sliding,
-                AttentionType::Sliding,
-                AttentionType::Full,
+                AttentionType::Sliding,    // 0
+                AttentionType::Sliding,    // 1
+                AttentionType::Sliding,    // 2
+                AttentionType::Sliding,    // 3
+                AttentionType::Sliding,    // 4
+                AttentionType::Full,       // 5
+                AttentionType::Sliding,    // 6
+                AttentionType::Sliding,    // 7
+                AttentionType::Sliding,    // 8
+                AttentionType::Sliding,    // 9
+                AttentionType::Sliding,    // 10
+                AttentionType::Full,       // 11
+                AttentionType::Sliding,    // 12
+                AttentionType::Sliding,    // 13
+                AttentionType::Sliding,    // 14
+                AttentionType::Sliding,    // 15
+                AttentionType::Sliding,    // 16
+                AttentionType::Full,       // 17
             ],
             query_pre_attn_scalar: Some(256.0),
             seed: None,
@@ -123,60 +107,46 @@ impl InitParams {
     }
 }
 
+pub struct Gemma3 {
+    token_embeddings: Embedding,
+    final_norm: RMSNorm,
+    out_head: Linear,
+    params: InitParams,
+}
+
+impl From<InitParams> for Gemma3 {
+    fn from(params: InitParams) -> Self {
+        Self::init(params)
+    }
+}
+
 impl Module for Gemma3 {
     type InitParams = InitParams;
-    type ForwardParams<'a> = Tensor;
+    type ForwardParams<'a> = &'a [usize];
 
     fn init(params: Self::InitParams) -> Self {
         // Validate layer_types length
         assert_eq!(params.layer_types.len(), params.n_layers);
 
-        // Initialize embedding (random for now)
-        let tok_emb = Tensor::rand(&[params.vocab_size, params.emb_dim], None);
-
-        // let create_block = || crate::transformer_block::InitParams::new(
-        //         params.emb_dim,
-        //         params.n_heads,
-        //         params.n_kv_groups,
-        //         Some(params.head_dim),//TODO: check why this is an option
-        //         params.hidden_dim,
-        //         params.qk_norm,
-        //         params.query_pre_attn_scalar,
-        //         params.seed,
-        //         params.bias
-        //         //TODO: check how to pass rope according to the type of attention
-        //     );
-
-        // // Initialize transformer blocks
-        // let  blocks = (0..params.n_layers).map(|_|create_block()).collect();
+        let token_embeddings = embedding::InitParams::new(params.vocab_size, params.emb_dim, params.seed).into();
 
         // Initialize final norm and output head
         let final_norm = rms_norm::InitParams::new(false, params.emb_dim, 1e-6).into();
         let out_head =
             linear::InitParams::new(false, params.emb_dim, params.vocab_size, params.seed).into();
 
-        // Compute RoPE parameters
-        // let local_rope = Rope::new(
-        //     params.head_dim,
-        //     params.rope_local_base,
-        //     params.context_length,
-        // );
-        // let global_rope = Rope::new(params.head_dim, params.rope_base, params.context_length);
-
         Self {
-            // tok_emb,
-            // blocks,
+            token_embeddings,
             final_norm,
             out_head,
-            // emb_dim: params.emb_dim,
             params,
         }
     }
 
     fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor {
-        let seq_len = params.shape().dims()[1];//TODO: check if this is correct
+        let seq_len = params.len();
 
-        let mut x = params; // Input tensor of shape (batch_size, seq_length, emb_dim)
+        let mut x = &self.token_embeddings.forward(params) * (self.params.emb_dim as f32).powf(0.5);
         let create_block = || {
             crate::transformer_block::InitParams::new(
                 self.params.emb_dim,
@@ -187,7 +157,7 @@ impl Module for Gemma3 {
                 self.params.qk_norm,
                 self.params.query_pre_attn_scalar,
                 self.params.seed,
-                self.params.bias, //TODO: check how to pass rope according to the type of attention
+                self.params.bias,
             )
         };
 
@@ -202,7 +172,7 @@ impl Module for Gemma3 {
             self.params.context_length,
         );
 
-        let masks = Mask::new(seq_len);
+        let masks = Mask::new(seq_len, self.params.sliding_window as isize);
 
         for layer_type in &self.params.layer_types {
             let (rope, mask) = match layer_type {
@@ -210,12 +180,8 @@ impl Module for Gemma3 {
                 AttentionType::Full => (&global_rope, masks.global()),
             };
             let mut block: TransformerBlock = create_block().into();
-            let block_params = crate::transformer_block::ForwardParams::new(
-                &x,
-                mask,
-                rope,
-            );
-           x = block.forward(block_params);
+            let block_params = crate::transformer_block::ForwardParams::new(&x, mask, rope);
+            x = block.forward(block_params);
         }
 
         x = self.final_norm.forward(&x);
