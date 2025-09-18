@@ -3,7 +3,6 @@ use crate::{modules::Module, tensor::{Tensor, TensorError}};
 // https://github.com/pytorch/pytorch/blob/886699bc5c23105f6105d329f6ff6c0ada7b473c/torch/csrc/api/include/torch/nn/functional/embedding.h#L22
 pub struct Embedding {
     weight: Tensor, // Shape: (num_embeddings, embedding_dim)
-    num_embeddings: usize,
     embedding_dim: usize,
 }
 
@@ -38,7 +37,6 @@ impl Module for Embedding {
 
         Self {
             weight,
-            num_embeddings: params.num_embeddings,
             embedding_dim: params.embedding_dim,
         }
     }
@@ -52,12 +50,6 @@ impl Module for Embedding {
 
         // For each token ID, lookup its embedding vector
         for &token_id in params {
-            assert!(
-                token_id < self.num_embeddings,
-                "Token ID {} >= vocab_size {}",
-                token_id,
-                self.num_embeddings
-            );
 
             // Calculate where this token's embedding starts in the weight matrix
             // weight matrix is stored as flat array: [token0_dim0, token0_dim1, ..., token1_dim0, token1_dim1, ...]
@@ -67,6 +59,7 @@ impl Module for Embedding {
             // Copy this token's embedding vector to output
             output_data.extend_from_slice(&data[start_idx..end_idx]);
         }
+
         // ALWAYS return with batch dimension: [1, seq_len, emb_dim] like pytorch
         Ok(Tensor::new(&[1, num_tokens, self.embedding_dim], output_data))
     }

@@ -114,14 +114,14 @@ impl Module for TransformerBlock {
             params.mask,
             params.rope,
         );
-        let mut x_attn = self.att.forward(attn_params)?;
-        x_attn = self.post_attention_layernorm.forward(&x_attn)?;
+        let x_attn = self.att.forward(attn_params)?;
+        let x_attn = self.post_attention_layernorm.forward(&x_attn)?;
 
         let x = (&x_attn + params.x)?;
 
-        let mut x_ffn = self.pre_feedforward_layernorm.forward(&x)?;
-        x_ffn = self.ff.forward(&x_ffn)?;
-        x_ffn = self.post_feedforward_layernorm.forward(&x_ffn)?;
+        let x_ffn = self.pre_feedforward_layernorm.forward(&x)?;
+        let x_ffn = self.ff.forward(&x_ffn)?;
+        let x_ffn = self.post_feedforward_layernorm.forward(&x_ffn)?;
         &x_ffn + &x
     }
 }

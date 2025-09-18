@@ -8,7 +8,7 @@ use llm::{
 
 fn bench(c: &mut Criterion) {
     let mut benchmark = c.benchmark_group("gemma");
-    config::set_default_benchmark_configs(&mut benchmark);
+    config::set_full_model_benchmark_configs(&mut benchmark);
 
     let mut gemma: Gemma3 = InitParams::gemma3_270m().into();
 

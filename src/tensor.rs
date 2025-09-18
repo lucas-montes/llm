@@ -6,6 +6,9 @@ use std::{
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use rayon::{iter::{
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator
+}, slice::ParallelSliceMut};
 
 use crate::erf::erf;
 
@@ -715,20 +718,47 @@ impl Tensor {
         let old_strides = compute_strides(&self.shape.0);
         let new_strides = compute_strides(&new_shape);
         let mut new_data = vec![0.0; self.data.len()];
-        for idx in 0..self.data.len() {
-            let mut old_idx = idx;
-            let mut indices = vec![0; self.shape.0.len()];
-            for (i, stride) in old_strides.iter().enumerate() {
-                indices[i] = old_idx / stride;
-                old_idx %= stride;
-            }
-            indices.swap(dim0, dim1);
-            let mut new_idx = 0;
-            for (i, stride) in new_strides.iter().enumerate() {
-                new_idx += indices[i] * stride;
-            }
-            new_data[new_idx] = self.data[idx];
+
+        // Parallelize the main loop
+        new_data
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(new_idx, new_val)| {
+                // Convert new_idx back to multi-dimensional indices
+                let new_indices = unravel_index(new_idx, &new_strides, &new_shape);
+
+                // Swap dimensions to get old indices
+                let mut old_indices = new_indices.clone();
+                old_indices.swap(dim0, dim1);
+
+                // Convert back to flat index
+                let old_idx = ravel_index(&old_indices, &old_strides, &self.shape.0);
+                *new_val = self.data[old_idx];
+            });
+
+        Tensor {
+            data: new_data,
+            shape: Shape::new(new_shape),
         }
+    }
+
+    pub fn transpose_chunked(&self, dim0: usize, dim1: usize) -> Tensor {
+        let mut new_shape = self.shape.0.clone();
+        new_shape.swap(dim0, dim1);
+        let old_strides = compute_strides(&self.shape.0);
+        let new_strides = compute_strides(&new_shape);
+
+        let new_data: Vec<f32> = (0..self.data.len())
+            .into_par_iter()
+            .map(|new_idx| {
+                let new_indices = unravel_index(new_idx, &new_strides, &new_shape);
+                let mut old_indices = new_indices.clone();
+                old_indices.swap(dim0, dim1);
+                let old_idx = ravel_index(&old_indices, &old_strides, &self.shape.0);
+                self.data[old_idx]
+            })
+            .collect();
+
         Tensor {
             data: new_data,
             shape: Shape::new(new_shape),
@@ -772,6 +802,7 @@ impl Tensor {
     }
 
     /// Matrix multiplication (supports 1D, 2D, and batched N-D tensors)
+    /// Optimized with parallelization and cache-friendly memory access patterns
     pub fn matmul(&self, other: &Tensor) -> Result<Tensor, TensorError> {
         let a_shape = &self.shape.0;
         let b_shape = &other.shape.0;
@@ -787,15 +818,22 @@ impl Tensor {
                         right_rows: b_shape[0],
                     });
                 }
-                let dot: f32 = self.data.iter().zip(&other.data).map(|(a, b)| a * b).sum();
+
+                // Parallel dot product with chunk-based reduction
+                let dot: f32 = self
+                    .data
+                    .par_iter()
+                    .zip(other.data.par_iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
+
                 Ok(Tensor {
                     data: vec![dot],
-                    shape: Shape::new(vec![]), // Scalar - empty shape like PyTorch
+                    shape: Shape::new(vec![]), // Scalar
                 })
             }
 
-            // Case 2: 1D × 2D - prepend 1 to first, remove it from result
-            // [n] × [n, m] -> [1, n] × [n, m] -> [1, m] -> [m]
+            // Case 2: 1D × 2D - optimized with parallelization
             (1, 2) => {
                 if a_shape[0] != b_shape[0] {
                     return Err(TensorError::InvalidMatrixMultiplication {
@@ -803,16 +841,20 @@ impl Tensor {
                         right_rows: b_shape[0],
                     });
                 }
-                let (k, n) = (b_shape[0], b_shape[1]);
-                let mut data = vec![0.0; n];
 
-                for j in 0..n {
-                    let mut sum = 0.0;
-                    for k_idx in 0..k {
-                        sum += self.data[k_idx] * other.data[k_idx * n + j];
-                    }
-                    data[j] = sum;
-                }
+                let (k, n) = (b_shape[0], b_shape[1]);
+
+                // Parallel computation over output columns
+                let data: Vec<f32> = (0..n)
+                    .into_par_iter()
+                    .map(|j| {
+                        let mut sum = 0.0;
+                        for k_idx in 0..k {
+                            sum += self.data[k_idx] * other.data[k_idx * n + j];
+                        }
+                        sum
+                    })
+                    .collect();
 
                 Ok(Tensor {
                     data,
@@ -820,8 +862,7 @@ impl Tensor {
                 })
             }
 
-            // Case 3: 2D × 1D - append 1 to second, remove it from result
-            // [m, n] × [n] -> [m, n] × [n, 1] -> [m, 1] -> [m]
+            // Case 3: 2D × 1D - optimized with parallelization
             (2, 1) => {
                 let (m, k) = (a_shape[0], a_shape[1]);
                 if k != b_shape[0] {
@@ -831,14 +872,18 @@ impl Tensor {
                     });
                 }
 
-                let mut data = vec![0.0; m];
-                for i in 0..m {
-                    let mut sum = 0.0;
-                    for k_idx in 0..k {
-                        sum += self.data[i * k + k_idx] * other.data[k_idx];
-                    }
-                    data[i] = sum;
-                }
+                // Parallel computation over output rows
+                let data: Vec<f32> = (0..m)
+                    .into_par_iter()
+                    .map(|i| {
+                        let mut sum = 0.0;
+                        let row_start = i * k;
+                        for k_idx in 0..k {
+                            sum += self.data[row_start + k_idx] * other.data[k_idx];
+                        }
+                        sum
+                    })
+                    .collect();
 
                 Ok(Tensor {
                     data,
@@ -846,7 +891,7 @@ impl Tensor {
                 })
             }
 
-            // Case 4: 2D × 2D - standard matrix multiplication
+            // Case 4: 2D × 2D - highly optimized matrix multiplication
             (2, 2) => {
                 let (m, k1) = (a_shape[0], a_shape[1]);
                 let (k2, n) = (b_shape[0], b_shape[1]);
@@ -857,24 +902,20 @@ impl Tensor {
                     });
                 }
 
-                let mut data = vec![0.0; m * n];
-                for i in 0..m {
-                    for j in 0..n {
-                        let mut sum = 0.0;
-                        for k in 0..k1 {
-                            sum += self.data[i * k1 + k] * other.data[k * n + j];
-                        }
-                        data[i * n + j] = sum;
-                    }
+                // Choose algorithm based on matrix size
+                if m * k1 * n < 8192 {
+                    // Small matrices: simple parallel row-wise computation
+                    self.matmul_2d_small(other, m, k1, n)
+                } else if m >= 64 && n >= 64 && k1 >= 64 {
+                    // Large matrices: blocked algorithm with parallelization
+                    self.matmul_2d_blocked(other, m, k1, n)
+                } else {
+                    // Medium matrices: cache-friendly row-parallel
+                    self.matmul_2d_medium(other, m, k1, n)
                 }
-                Ok(Tensor {
-                    data,
-                    shape: Shape::new(vec![m, n]),
-                })
             }
 
-            // Case 5: 1D × ND (N > 2) - prepend 1, remove after
-            // [k] × [..., k, n] -> [1, k] × [..., k, n] -> [..., 1, n] -> [..., n]
+            // Case 5: 1D × ND (N > 2) - parallel batched computation
             (1, b_ndim) if b_ndim > 2 => {
                 let k = a_shape[0];
                 if k != b_shape[b_ndim - 2] {
@@ -888,20 +929,22 @@ impl Tensor {
                 let batch_dims = &b_shape[..b_ndim - 2];
                 let batch_size: usize = batch_dims.iter().product();
 
-                let mut data = vec![0.0; batch_size * n];
-
-                for batch_idx in 0..batch_size {
-                    let b_batch_offset = batch_idx * k * n;
-                    let out_batch_offset = batch_idx * n;
-
-                    for j in 0..n {
-                        let mut sum = 0.0;
-                        for k_idx in 0..k {
-                            sum += self.data[k_idx] * other.data[b_batch_offset + k_idx * n + j];
-                        }
-                        data[out_batch_offset + j] = sum;
-                    }
-                }
+                let data: Vec<f32> = (0..batch_size)
+                    .into_par_iter()
+                    .flat_map(|batch_idx| {
+                        let b_batch_offset = batch_idx * k * n;
+                        (0..n)
+                            .map(move |j| {
+                                let mut sum = 0.0;
+                                for k_idx in 0..k {
+                                    sum += self.data[k_idx]
+                                        * other.data[b_batch_offset + k_idx * n + j];
+                                }
+                                sum
+                            })
+                            .collect::<Vec<f32>>()
+                    })
+                    .collect();
 
                 let mut output_shape = batch_dims.to_vec();
                 output_shape.push(n);
@@ -911,8 +954,7 @@ impl Tensor {
                 })
             }
 
-            // Case 6: ND × 1D (N > 2) - append 1, remove after
-            // [..., m, k] × [k] -> [..., m, k] × [k, 1] -> [..., m, 1] -> [..., m]
+            // Case 6: ND × 1D (N > 2) - parallel batched computation
             (a_ndim, 1) if a_ndim > 2 => {
                 let k = b_shape[0];
                 let m = a_shape[a_ndim - 2];
@@ -926,123 +968,33 @@ impl Tensor {
                 let batch_dims = &a_shape[..a_ndim - 2];
                 let batch_size: usize = batch_dims.iter().product();
 
-                let mut data = vec![0.0; batch_size * m];
+                use rayon::prelude::*;
+                let data: Vec<f32> = (0..batch_size)
+                    .into_par_iter()
+                    .flat_map(|batch_idx| {
+                        let a_batch_offset = batch_idx * m * k;
+                        (0..m)
+                            .map(move |i| {
+                                let mut sum = 0.0;
+                                let row_start = a_batch_offset + i * k;
+                                for k_idx in 0..k {
+                                    sum += self.data[row_start + k_idx] * other.data[k_idx];
+                                }
+                                sum
+                            })
+                            .collect::<Vec<f32>>()
+                    })
+                    .collect();
 
-                for batch_idx in 0..batch_size {
-                    let a_batch_offset = batch_idx * m * k;
-                    let out_batch_offset = batch_idx * m;
-
-                    for i in 0..m {
-                        let mut sum = 0.0;
-                        for k_idx in 0..k {
-                            sum += self.data[a_batch_offset + i * k + k_idx] * other.data[k_idx];
-                        }
-                        data[out_batch_offset + i] = sum;
-                    }
-                }
-
-                let output_shape = batch_dims.to_vec();
                 Ok(Tensor {
                     data,
-                    shape: Shape::new(output_shape),
+                    shape: Shape::new(batch_dims.to_vec()),
                 })
             }
 
-            // Case 7: General ND × MD batched matmul (both N,M >= 2)
+            // Case 7: General ND × MD batched matmul - highly optimized
             (a_ndim, b_ndim) if a_ndim >= 2 && b_ndim >= 2 => {
-                // Get matrix dimensions (last 2 dimensions)
-                let (m, k1) = (a_shape[a_ndim - 2], a_shape[a_ndim - 1]);
-                let (k2, n) = (b_shape[b_ndim - 2], b_shape[b_ndim - 1]);
-
-                if k1 != k2 {
-                    return Err(TensorError::InvalidMatrixMultiplication {
-                        left_cols: k1,
-                        right_rows: k2,
-                    });
-                }
-
-                // Broadcast batch dimensions using existing broadcast logic
-                let a_batch_dims = &a_shape[..a_ndim - 2];
-                let b_batch_dims = &b_shape[..b_ndim - 2];
-
-                let batch_shape = if a_batch_dims.is_empty() && b_batch_dims.is_empty() {
-                    vec![]
-                } else if a_batch_dims.is_empty() {
-                    b_batch_dims.to_vec()
-                } else if b_batch_dims.is_empty() {
-                    a_batch_dims.to_vec()
-                } else {
-                    Shape::new(a_batch_dims.to_vec())
-                        .broadcast(&Shape::new(b_batch_dims.to_vec()))?
-                        .0
-                };
-
-                let batch_size = if batch_shape.is_empty() {
-                    1
-                } else {
-                    batch_shape.iter().product()
-                };
-                let a_batch_size: usize = if a_batch_dims.is_empty() {
-                    1
-                } else {
-                    a_batch_dims.iter().product()
-                };
-                let b_batch_size: usize = if b_batch_dims.is_empty() {
-                    1
-                } else {
-                    b_batch_dims.iter().product()
-                };
-
-                let mut data = vec![0.0; batch_size * m * n];
-
-                // Perform batched matrix multiplication
-                for batch_idx in 0..batch_size {
-                    // Handle broadcasting for batch indices
-                    let a_batch_idx = if a_batch_size == 1 {
-                        0
-                    } else if a_batch_size == batch_size {
-                        batch_idx
-                    } else {
-                        // More complex broadcasting - map batch_idx to appropriate a_batch_idx
-                        batch_idx % a_batch_size
-                    };
-
-                    let b_batch_idx = if b_batch_size == 1 {
-                        0
-                    } else if b_batch_size == batch_size {
-                        batch_idx
-                    } else {
-                        // More complex broadcasting - map batch_idx to appropriate b_batch_idx
-                        batch_idx % b_batch_size
-                    };
-
-                    let a_batch_offset = a_batch_idx * m * k1;
-                    let b_batch_offset = b_batch_idx * k2 * n;
-                    let out_batch_offset = batch_idx * m * n;
-
-                    // Standard 2D matrix multiplication for this batch
-                    for i in 0..m {
-                        for j in 0..n {
-                            let mut sum = 0.0;
-                            for k in 0..k1 {
-                                let a_idx = a_batch_offset + i * k1 + k;
-                                let b_idx = b_batch_offset + k * n + j;
-                                sum += self.data[a_idx] * other.data[b_idx];
-                            }
-                            let out_idx = out_batch_offset + i * n + j;
-                            data[out_idx] = sum;
-                        }
-                    }
-                }
-
-                // Construct output shape: batch_dims + [m, n]
-                let mut output_shape = batch_shape;
-                output_shape.extend_from_slice(&[m, n]);
-
-                Ok(Tensor {
-                    data,
-                    shape: Shape::new(output_shape),
-                })
+                self.matmul_batched_optimized(other, a_ndim, b_ndim)
             }
 
             // Invalid cases
@@ -1051,6 +1003,261 @@ impl Tensor {
                 right_rows: *b_shape.first().unwrap_or(&0),
             }),
         }
+    }
+
+    // Helper method for small 2D matrices
+    fn matmul_2d_small(
+        &self,
+        other: &Tensor,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Result<Tensor, TensorError> {
+
+        let data: Vec<f32> = (0..m)
+            .into_par_iter()
+            .flat_map(|i| {
+                (0..n)
+                    .map(move |j| {
+                        let mut sum = 0.0;
+                        let row_start = i * k;
+                        for k_idx in 0..k {
+                            sum += self.data[row_start + k_idx] * other.data[k_idx * n + j];
+                        }
+                        sum
+                    })
+                    .collect::<Vec<f32>>()
+            })
+            .collect();
+
+        Ok(Tensor {
+            data,
+            shape: Shape::new(vec![m, n]),
+        })
+    }
+
+    // Helper method for medium 2D matrices
+    fn matmul_2d_medium(
+        &self,
+        other: &Tensor,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Result<Tensor, TensorError> {
+        use rayon::prelude::*;
+
+        let mut data = vec![0.0; m * n];
+
+        // Parallel over rows with better cache utilization
+        data.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+            let row_start = i * k;
+            for j in 0..n {
+                let mut sum = 0.0;
+                // Inner loop optimized for cache
+                for k_idx in 0..k {
+                    sum += self.data[row_start + k_idx] * other.data[k_idx * n + j];
+                }
+                row[j] = sum;
+            }
+        });
+
+        Ok(Tensor {
+            data,
+            shape: Shape::new(vec![m, n]),
+        })
+    }
+
+    // Helper method for large 2D matrices using blocked algorithm
+    fn matmul_2d_blocked(
+        &self,
+        other: &Tensor,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Result<Tensor, TensorError> {
+        const BLOCK_SIZE: usize = 64;
+        let mut data = vec![0.0; m * n];
+
+        // Process blocks of rows in parallel
+        data.par_chunks_mut(BLOCK_SIZE * n)
+            .enumerate()
+            .for_each(|(block_idx, chunk)| {
+                let i_start = block_idx * BLOCK_SIZE;
+                let i_end = (i_start + BLOCK_SIZE).min(m);
+                let actual_rows = i_end - i_start;
+
+                for j_start in (0..n).step_by(BLOCK_SIZE) {
+                    let j_end = (j_start + BLOCK_SIZE).min(n);
+
+                    for k_start in (0..k).step_by(BLOCK_SIZE) {
+                        let k_end = (k_start + BLOCK_SIZE).min(k);
+
+                        // Process block with optimal memory access pattern
+                        for i_rel in 0..actual_rows {
+                            let i_abs = i_start + i_rel;
+                            let out_row_start = i_rel * n;
+                            let a_row_start = i_abs * k;
+
+                            for k_idx in k_start..k_end {
+                                let a_val = self.data[a_row_start + k_idx];
+                                let b_row_start = k_idx * n;
+
+                                for j in j_start..j_end {
+                                    chunk[out_row_start + j] += a_val * other.data[b_row_start + j];
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+        Ok(Tensor {
+            data,
+            shape: Shape::new(vec![m, n]),
+        })
+    }
+
+    // Helper method for batched matrix multiplication
+    fn matmul_batched_optimized(
+        &self,
+        other: &Tensor,
+        a_ndim: usize,
+        b_ndim: usize,
+    ) -> Result<Tensor, TensorError> {
+        let a_shape = &self.shape.0;
+        let b_shape = &other.shape.0;
+
+        // Get matrix dimensions (last 2 dimensions)
+        let (m, k1) = (a_shape[a_ndim - 2], a_shape[a_ndim - 1]);
+        let (k2, n) = (b_shape[b_ndim - 2], b_shape[b_ndim - 1]);
+
+        if k1 != k2 {
+            return Err(TensorError::InvalidMatrixMultiplication {
+                left_cols: k1,
+                right_rows: k2,
+            });
+        }
+
+        // Broadcast batch dimensions
+        let a_batch_dims = &a_shape[..a_ndim - 2];
+        let b_batch_dims = &b_shape[..b_ndim - 2];
+
+        let batch_shape = if a_batch_dims.is_empty() && b_batch_dims.is_empty() {
+            vec![]
+        } else if a_batch_dims.is_empty() {
+            b_batch_dims.to_vec()
+        } else if b_batch_dims.is_empty() {
+            a_batch_dims.to_vec()
+        } else {
+            Shape::new(a_batch_dims.to_vec())
+                .broadcast(&Shape::new(b_batch_dims.to_vec()))?
+                .0
+        };
+
+        let batch_size = if batch_shape.is_empty() {
+            1
+        } else {
+            batch_shape.iter().product()
+        };
+        let a_batch_size: usize = if a_batch_dims.is_empty() {
+            1
+        } else {
+            a_batch_dims.iter().product()
+        };
+        let b_batch_size: usize = if b_batch_dims.is_empty() {
+            1
+        } else {
+            b_batch_dims.iter().product()
+        };
+
+        use rayon::prelude::*;
+
+        // Parallel batched computation with optimized inner loops
+        let data: Vec<f32> = (0..batch_size)
+            .into_par_iter()
+            .flat_map(|batch_idx| {
+                // Handle broadcasting for batch indices
+                let a_batch_idx = if a_batch_size == 1 {
+                    0
+                } else if a_batch_size == batch_size {
+                    batch_idx
+                } else {
+                    batch_idx % a_batch_size
+                };
+
+                let b_batch_idx = if b_batch_size == 1 {
+                    0
+                } else if b_batch_size == batch_size {
+                    batch_idx
+                } else {
+                    batch_idx % b_batch_size
+                };
+
+                let a_batch_offset = a_batch_idx * m * k1;
+                let b_batch_offset = b_batch_idx * k2 * n;
+
+                // Optimized 2D matrix multiplication for this batch
+                let mut batch_result = vec![0.0; m * n];
+
+                if m * k1 * n < 4096 {
+                    // Small batch matrices - simple algorithm
+                    for i in 0..m {
+                        let a_row_start = a_batch_offset + i * k1;
+                        let out_row_start = i * n;
+
+                        for j in 0..n {
+                            let mut sum = 0.0;
+                            for k_idx in 0..k1 {
+                                sum += self.data[a_row_start + k_idx]
+                                    * other.data[b_batch_offset + k_idx * n + j];
+                            }
+                            batch_result[out_row_start + j] = sum;
+                        }
+                    }
+                } else {
+                    // Larger batch matrices - cache-friendly blocked approach
+                    const BATCH_BLOCK_SIZE: usize = 32;
+
+                    for i_start in (0..m).step_by(BATCH_BLOCK_SIZE) {
+                        let i_end = (i_start + BATCH_BLOCK_SIZE).min(m);
+
+                        for j_start in (0..n).step_by(BATCH_BLOCK_SIZE) {
+                            let j_end = (j_start + BATCH_BLOCK_SIZE).min(n);
+
+                            for k_start in (0..k1).step_by(BATCH_BLOCK_SIZE) {
+                                let k_end = (k_start + BATCH_BLOCK_SIZE).min(k1);
+
+                                for i in i_start..i_end {
+                                    let a_row_start = a_batch_offset + i * k1;
+                                    let out_row_start = i * n;
+
+                                    for k_idx in k_start..k_end {
+                                        let a_val = self.data[a_row_start + k_idx];
+                                        let b_row_start = b_batch_offset + k_idx * n;
+
+                                        for j in j_start..j_end {
+                                            batch_result[out_row_start + j] +=
+                                                a_val * other.data[b_row_start + j];
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                batch_result
+            })
+            .collect();
+
+        // Construct output shape: batch_dims + [m, n]
+        let mut output_shape = batch_shape;
+        output_shape.extend_from_slice(&[m, n]);
+
+        Ok(Tensor {
+            data,
+            shape: Shape::new(output_shape),
+        })
     }
 }
 

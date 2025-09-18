@@ -1,4 +1,4 @@
-use crate::tensor::Tensor;
+use crate::tensor::{Tensor, TensorError};
 
 pub struct Rope {
     cos: Tensor,
@@ -15,8 +15,6 @@ impl Rope {
             .take(head_dim / 2)
             .map(|i| 1.0 / theta_base.powf(i as f32 / head_dim as f32))
             .collect();
-
-        // vec![vec![0.0; head_dim]; context_length];
 
         //TODO: try to iter over the inv_freq without collecting. Loop over context_length and set the values
 
@@ -46,7 +44,7 @@ impl Rope {
         }
     }
 
-    pub fn apply(&self, x: &Tensor) -> Tensor {
+    pub fn apply(&self, x: &Tensor) -> Result<Tensor, TensorError> {
         let dims = x.shape().dims();
         let seq_len = dims[2];
         let head_dim = dims[3];
@@ -54,38 +52,29 @@ impl Rope {
         // Extract cos and sin for current sequence
         let cos = self
             .cos
-            .slice(&[0..seq_len, 0..head_dim])
-            .unwrap()
-            .unsqueeze(0)
-            .unwrap()
-            .unsqueeze(0)
-            .unwrap();
+            .slice(&[0..seq_len, 0..head_dim])?
+            .unsqueeze(0)?
+            .unsqueeze(0)?;
+
         let sin = self
             .sin
-            .slice(&[0..seq_len, 0..head_dim])
-            .unwrap()
-            .unsqueeze(0)
-            .unwrap()
-            .unsqueeze(0)
-            .unwrap();
+            .slice(&[0..seq_len, 0..head_dim])?
+            .unsqueeze(0)?
+            .unsqueeze(0)?;
 
         // Split into halves
-        let x1 = x
-            .slice(&[0..dims[0], 0..dims[1], 0..dims[2], 0..(head_dim / 2)])
-            .unwrap();
-        let x2 = x
-            .slice(&[0..dims[0], 0..dims[1], 0..dims[2], (head_dim / 2)..head_dim])
-            .unwrap();
+        let x1 = x.slice(&[0..dims[0], 0..dims[1], 0..dims[2], 0..(head_dim / 2)])?;
+        let x2 = x.slice(&[0..dims[0], 0..dims[1], 0..dims[2], (head_dim / 2)..head_dim])?;
 
         // Create rotated tensor: [-x2, x1]
         let neg_x2 = x2.neg();
-        let rotated = Tensor::cat(&[&neg_x2, &x1], -1).unwrap();
+        let rotated = Tensor::cat(&[&neg_x2, &x1], -1)?;
 
         // Apply rotation: x * cos + rotated * sin
-        let x_cos = (x * &cos).unwrap();
-        let rotated_sin = (&rotated * &sin).unwrap();
+        let x_cos = (x * &cos)?;
+        let rotated_sin = (&rotated * &sin)?;
 
-        (&x_cos + &rotated_sin).unwrap()
+        &x_cos + &rotated_sin
     }
 }
 
@@ -110,7 +99,7 @@ mod tests {
             ],
         ]]);
 
-        let result = rope.apply(&x);
+        let result = rope.apply(&x).unwrap();
         let expected = Tensor::from([[
             [
                 [1.0000, 2.0000, 3.0000, 4.0000],

@@ -1,6 +1,6 @@
 use crate::benchmarks::config;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
 fn bench(c: &mut Criterion) {
     let mut benchmark = c.benchmark_group("tensors");
@@ -10,8 +10,6 @@ fn bench(c: &mut Criterion) {
 
     for (rows, cols) in [
         (1, 1),
-        (1, 10),
-        (10, 1),
         (10, 10),
         (100, 100),
         (1000, 1000),
@@ -23,24 +21,35 @@ fn bench(c: &mut Criterion) {
         let size = format!("rows({rows})xcols({cols})");
 
         benchmark.bench_with_input(
-            BenchmarkId::new("regular_rqsrt", &size),
+            BenchmarkId::new("matmul", &size),
             &tensor,
             |b, tensor| {
                 b.iter(|| {
-                    tensor.rsqrt_slow();
+                    let _ = tensor.matmul(black_box(tensor)).unwrap();
                 });
             },
         );
 
-        benchmark.bench_with_input(
-            BenchmarkId::new("qwake_rqsrt", &size),
-            &tensor,
-            |b, tensor| {
-                b.iter(|| {
-                    tensor.rsqrt();
-                });
-            },
-        );
+
+        // benchmark.bench_with_input(
+        //     BenchmarkId::new("regular_rqsrt", &size),
+        //     &tensor,
+        //     |b, tensor| {
+        //         b.iter(|| {
+        //             tensor.rsqrt_slow();
+        //         });
+        //     },
+        // );
+
+        // benchmark.bench_with_input(
+        //     BenchmarkId::new("qwake_rqsrt", &size),
+        //     &tensor,
+        //     |b, tensor| {
+        //         b.iter(|| {
+        //             tensor.rsqrt();
+        //         });
+        //     },
+        // );
 
         // benchmark.bench_with_input(BenchmarkId::new("smid_rqsrt", &size), &tensor, |b, tensor| {
         //     b.iter(|| {

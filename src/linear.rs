@@ -44,6 +44,7 @@ impl Module for Linear {
     }
 
     fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Result<Tensor, TensorError> {
+        //NOTE: test to have bias set to 0 so we always do the operation, we remove the branch
         let result = params.matmul(&self.weight.transpose(0, 1));
         match self.bias.as_ref() {
             Some(b) => &result? + b,

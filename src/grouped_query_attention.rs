@@ -1,3 +1,5 @@
+use std::ops::Mul;
+
 use crate::{
     linear::Linear,
     modules::Module,
@@ -147,19 +149,24 @@ impl Module for GroupedQueryAttention {
         let num_tokens = *dims.next().unwrap();
 
         // Apply projections
-        let mut queries = self.w_query.forward(&params.x)?;
-        let mut keys = self.w_key.forward(&params.x)?;
-        let values = self.w_value.forward(&params.x)?;
-
-        queries = queries
+        let mut queries = self
+            .w_query
+            .forward(&params.x)?
             .view(&[b, num_tokens, self.num_heads, self.head_dim])?
             .transpose(1, 2);
-        keys = keys
+
+        let mut keys = self
+            .w_key
+            .forward(&params.x)?
             .view(&[b, num_tokens, self.num_kv_groups, self.head_dim])?
             .transpose(1, 2);
-        let mut values = values
+
+        let values = self
+            .w_value
+            .forward(&params.x)?
             .view(&[b, num_tokens, self.num_kv_groups, self.head_dim])?
-            .transpose(1, 2);
+            .transpose(1, 2)
+            .repeat_interleave(self.group_size, 1);
 
         // Optional normalization
         if let Some(norm) = self.q_norm.as_mut() {
@@ -170,22 +177,21 @@ impl Module for GroupedQueryAttention {
             keys = norm.forward(&keys)?;
         };
 
-        queries = params.rope.apply(&queries);
-        keys = params.rope.apply(&keys);
-
         // Expand K and V to match number of heads
-        keys = keys.repeat_interleave(self.group_size, 1);
-        values = values.repeat_interleave(self.group_size, 1);
+        keys = params
+            .rope
+            .apply(&keys)?
+            .repeat_interleave(self.group_size, 1)
+            .transpose(2, 3);
 
-        queries = &queries * self.scaling;
-
-        let mut attn_scores = queries.matmul(&keys.transpose(2, 3))?;
-
-        attn_scores = attn_scores.masked_fill(&params.mask, -f32::INFINITY)?;
-
-        let attn_weights = attn_scores.softmax(-1)?;
-
-        let context = (attn_weights.matmul(&values))?
+        let context = params
+            .rope
+            .apply(&queries)?
+            .mul(self.scaling)
+            .matmul(&keys)?
+            .masked_fill(&params.mask, -f32::INFINITY)?
+            .softmax(-1)?
+            .matmul(&values)?
             .transpose(1, 2)
             .view(&[b, num_tokens, self.d_out])?;
 

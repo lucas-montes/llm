@@ -1,6 +1,6 @@
 use crate::{
     linear::Linear,
-    modules::{gelu, Module},
+    modules::{Module, gelu},
     tensor::{Tensor, TensorError},
 };
 
@@ -65,10 +65,15 @@ impl Module for FeedForward {
     }
 
     fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Result<Tensor, TensorError> {
-        let x1 = self.linear1.forward(params)?;
-        let x2 = self.linear2.forward(params)?;
+        // let x1 = self.linear1.forward(params)?;
+        // let x2 = self.linear2.forward(params)?;
 
-        let x3 = (&gelu(&x1, true)? * &x2)?;
+        let (x1, x2) = rayon::join(
+            || self.linear1.forward(params),
+            || self.linear2.forward(params),
+        );
+
+        let x3 = (&gelu(&x1?, true)? * &x2?)?;
 
         self.linear3.forward(&x3)
     }

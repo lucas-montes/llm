@@ -1,0 +1,491 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="486" onload="init(evt)" viewBox="0 0 1200 486" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fg="http://github.com/jonhoo/inferno"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:monospace; font-size:12px }
+#title { text-anchor:middle; font-size:17px; }
+#matched { text-anchor:end; }
+#search { text-anchor:end; opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[
+        var nametype = 'Function:';
+        var fontsize = 12;
+        var fontwidth = 0.59;
+        var xpad = 10;
+        var inverted = false;
+        var searchcolor = 'rgb(230,0,230)';
+        var fluiddrawing = true;
+        var truncate_text_right = false;
+    ]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames, known_font_width;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    known_font_width = get_monospace_width(frames);
+    total_samples = parseInt(frames.attributes.total_samples.value);
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[*|x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+            svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            update_text_for_elements(frames.children);
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad;
+            matchedtxt.attributes.x.value = svgWidth - xpad;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes["fg:x"]) {
+            var params = get_params()
+            params.x = el.attributes["fg:x"].value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["fg:orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("fg:orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["fg:orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["fg:orig_" + attr].value;
+    e.removeAttribute("fg:orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function get_monospace_width(frames) {
+    // Given the id="frames" element, return the width of text characters if
+    // this is a monospace font, otherwise return 0.
+    text = find_child(frames.children[0], "text");
+    originalContent = text.textContent;
+    text.textContent = "!";
+    bangWidth = text.getComputedTextLength();
+    text.textContent = "W";
+    wWidth = text.getComputedTextLength();
+    text.textContent = originalContent;
+    if (bangWidth === wWidth) {
+        return bangWidth;
+    } else {
+        return 0;
+    }
+}
+function update_text_for_elements(elements) {
+    // In order to render quickly in the browser, you want to do one pass of
+    // reading attributes, and one pass of mutating attributes. See
+    // https://web.dev/avoid-large-complex-layouts-and-layout-thrashing/ for details.
+
+    // Fall back to inefficient calculation, if we're variable-width font.
+    // TODO This should be optimized somehow too.
+    if (known_font_width === 0) {
+        for (var i = 0; i < elements.length; i++) {
+            update_text(elements[i]);
+        }
+        return;
+    }
+
+    var textElemNewAttributes = [];
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var r = find_child(e, "rect");
+        var t = find_child(e, "text");
+        var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+        var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+        var newX = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+        // Smaller than this size won't fit anything
+        if (w < 2 * known_font_width) {
+            textElemNewAttributes.push([newX, ""]);
+            continue;
+        }
+
+        // Fit in full text width
+        if (txt.length * known_font_width < w) {
+            textElemNewAttributes.push([newX, txt]);
+            continue;
+        }
+
+        var substringLength = Math.floor(w / known_font_width) - 2;
+        if (truncate_text_right) {
+            // Truncate the right side of the text.
+            textElemNewAttributes.push([newX, txt.substring(0, substringLength) + ".."]);
+            continue;
+        } else {
+            // Truncate the left side of the text.
+            textElemNewAttributes.push([newX, ".." + txt.substring(txt.length - substringLength, txt.length)]);
+            continue;
+        }
+    }
+
+    console.assert(textElemNewAttributes.length === elements.length, "Resize failed, please file a bug at https://github.com/jonhoo/inferno/");
+
+    // Now that we know new textContent, set it all in one go so we don't refresh a bazillion times.
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var values = textElemNewAttributes[i];
+        var t = find_child(e, "text");
+        t.attributes.x.value = values[0];
+        t.textContent = values[1];
+    }
+}
+
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * parseInt(e.attributes["fg:x"].value) / total_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / total_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, zoomed_width_samples) {
+    if (e.tagName == "text") {
+        var parent_x = parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value);
+        e.attributes.x.value = format_percent(parent_x + (100 * 3 / frames.attributes.width.value));
+    } else if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * (parseInt(e.attributes["fg:x"].value) - x) / zoomed_width_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / zoomed_width_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, zoomed_width_samples);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseInt(attr["fg:w"].value);
+    var xmin = parseInt(attr["fg:x"].value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    var to_update_text = [];
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseInt(a["fg:x"].value);
+        var ew = parseInt(a["fg:w"].value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                to_update_text.push(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, width);
+                to_update_text.push(e);
+            }
+        }
+    }
+    update_text_for_elements(to_update_text);
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+    }
+    update_text_for_elements(el);
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        // Skip over frames which are either not visible, or below the zoomed-to frame
+        if (e.classList.contains("hide") || e.classList.contains("parent")) {
+            continue;
+        }
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseInt(rect.attributes["fg:w"].value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseInt(rect.attributes["fg:x"].value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    for (var k in keys) {
+        var x = parseInt(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="486" fill="url(#background)"/><text id="title" fill="rgb(0,0,0)" x="50.0000%" y="24.00">Flame Graph</text><text id="details" fill="rgb(0,0,0)" x="10" y="469.00"> </text><text id="unzoom" class="hide" fill="rgb(0,0,0)" x="10" y="24.00">Reset Zoom</text><text id="search" fill="rgb(0,0,0)" x="1190" y="24.00">Search</text><text id="matched" fill="rgb(0,0,0)" x="1190" y="469.00"> </text><svg id="frames" x="10" width="1180" total_samples="15724"><g><title>llm::tensor::Tensor::matmul (9,120 samples, 58.00%)</title><rect x="0.0064%" y="181" width="58.0005%" height="15" fill="rgb(245,200,0)" fg:x="1" fg:w="9120"/><text x="0.2564%" y="191.50">llm::tensor::Tensor::matmul</text></g><g><title>__GI___libc_free (97 samples, 0.62%)</title><rect x="60.4681%" y="165" width="0.6169%" height="15" fill="rgb(245,119,33)" fg:x="9508" fg:w="97"/><text x="60.7181%" y="175.50"></text></g><g><title>_int_free (64 samples, 0.41%)</title><rect x="60.6779%" y="149" width="0.4070%" height="15" fill="rgb(231,125,12)" fg:x="9541" fg:w="64"/><text x="60.9279%" y="159.50"></text></g><g><title>__libc_calloc (185 samples, 1.18%)</title><rect x="61.0850%" y="165" width="1.1765%" height="15" fill="rgb(216,96,41)" fg:x="9605" fg:w="185"/><text x="61.3350%" y="175.50"></text></g><g><title>_int_malloc (106 samples, 0.67%)</title><rect x="61.5874%" y="149" width="0.6741%" height="15" fill="rgb(248,43,45)" fg:x="9684" fg:w="106"/><text x="61.8374%" y="159.50"></text></g><g><title>__rustc::__rdl_alloc_zeroed (28 samples, 0.18%)</title><rect x="62.2615%" y="165" width="0.1781%" height="15" fill="rgb(217,222,7)" fg:x="9790" fg:w="28"/><text x="62.5115%" y="175.50"></text></g><g><title>&lt;llm::linear::Linear as llm::modules::Module&gt;::forward (9,820 samples, 62.45%)</title><rect x="0.0000%" y="197" width="62.4523%" height="15" fill="rgb(233,28,6)" fg:x="0" fg:w="9820"/><text x="0.2500%" y="207.50">&lt;llm::linear::Linear as llm::modules::Module&gt;::forward</text></g><g><title>llm::tensor::Tensor::transpose (699 samples, 4.45%)</title><rect x="58.0069%" y="181" width="4.4454%" height="15" fill="rgb(231,218,15)" fg:x="9121" fg:w="699"/><text x="58.2569%" y="191.50">llm::..</text></g><g><title>__rustc::__rdl_dealloc (2 samples, 0.01%)</title><rect x="62.4396%" y="165" width="0.0127%" height="15" fill="rgb(226,171,48)" fg:x="9818" fg:w="2"/><text x="62.6896%" y="175.50"></text></g><g><title>llm::tensor::Tensor::get_broadcasted (3 samples, 0.02%)</title><rect x="62.4523%" y="133" width="0.0191%" height="15" fill="rgb(235,201,9)" fg:x="9820" fg:w="3"/><text x="62.7023%" y="143.50"></text></g><g><title>malloc (2 samples, 0.01%)</title><rect x="62.4587%" y="117" width="0.0127%" height="15" fill="rgb(217,80,15)" fg:x="9821" fg:w="2"/><text x="62.7087%" y="127.50"></text></g><g><title>&lt;llm::rms_norm::RMSNorm as llm::modules::Module&gt;::forward (4 samples, 0.03%)</title><rect x="62.4523%" y="197" width="0.0254%" height="15" fill="rgb(219,152,8)" fg:x="9820" fg:w="4"/><text x="62.7023%" y="207.50"></text></g><g><title>&lt;&amp;llm::tensor::Tensor as core::ops::arith::Mul&gt;::mul (4 samples, 0.03%)</title><rect x="62.4523%" y="181" width="0.0254%" height="15" fill="rgb(243,107,38)" fg:x="9820" fg:w="4"/><text x="62.7023%" y="191.50"></text></g><g><title>&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter::SpecFromIter&lt;T,I&gt;&gt;::from_iter (4 samples, 0.03%)</title><rect x="62.4523%" y="165" width="0.0254%" height="15" fill="rgb(231,17,5)" fg:x="9820" fg:w="4"/><text x="62.7023%" y="175.50"></text></g><g><title>&lt;core::iter::adapters::map::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::fold (4 samples, 0.03%)</title><rect x="62.4523%" y="149" width="0.0254%" height="15" fill="rgb(209,25,54)" fg:x="9820" fg:w="4"/><text x="62.7023%" y="159.50"></text></g><g><title>llm::tensor::Tensor::matmul (2,932 samples, 18.65%)</title><rect x="62.4777%" y="149" width="18.6467%" height="15" fill="rgb(219,0,2)" fg:x="9824" fg:w="2932"/><text x="62.7277%" y="159.50">llm::tensor::Tensor::matmul</text></g><g><title>__GI___libc_free (44 samples, 0.28%)</title><rect x="82.2246%" y="133" width="0.2798%" height="15" fill="rgb(246,9,5)" fg:x="12929" fg:w="44"/><text x="82.4746%" y="143.50"></text></g><g><title>_int_free (32 samples, 0.20%)</title><rect x="82.3009%" y="117" width="0.2035%" height="15" fill="rgb(226,159,4)" fg:x="12941" fg:w="32"/><text x="82.5509%" y="127.50"></text></g><g><title>__libc_calloc (69 samples, 0.44%)</title><rect x="82.5045%" y="133" width="0.4388%" height="15" fill="rgb(219,175,34)" fg:x="12973" fg:w="69"/><text x="82.7545%" y="143.50"></text></g><g><title>_int_malloc (41 samples, 0.26%)</title><rect x="82.6825%" y="117" width="0.2607%" height="15" fill="rgb(236,10,46)" fg:x="13001" fg:w="41"/><text x="82.9325%" y="127.50"></text></g><g><title>__memset_avx2_unaligned_erms (2 samples, 0.01%)</title><rect x="82.9433%" y="133" width="0.0127%" height="15" fill="rgb(240,211,16)" fg:x="13042" fg:w="2"/><text x="83.1933%" y="143.50"></text></g><g><title>__rustc::__rdl_alloc_zeroed (5 samples, 0.03%)</title><rect x="82.9560%" y="133" width="0.0318%" height="15" fill="rgb(205,3,43)" fg:x="13044" fg:w="5"/><text x="83.2060%" y="143.50"></text></g><g><title>&lt;llm::linear::Linear as llm::modules::Module&gt;::forward (3,228 samples, 20.53%)</title><rect x="62.4777%" y="165" width="20.5291%" height="15" fill="rgb(245,7,22)" fg:x="9824" fg:w="3228"/><text x="62.7277%" y="175.50">&lt;llm::linear::Linear as llm::mod..</text></g><g><title>llm::tensor::Tensor::transpose (296 samples, 1.88%)</title><rect x="81.1244%" y="149" width="1.8825%" height="15" fill="rgb(239,132,32)" fg:x="12756" fg:w="296"/><text x="81.3744%" y="159.50">l..</text></g><g><title>__rustc::__rdl_dealloc (3 samples, 0.02%)</title><rect x="82.9878%" y="133" width="0.0191%" height="15" fill="rgb(228,202,34)" fg:x="13049" fg:w="3"/><text x="83.2378%" y="143.50"></text></g><g><title>&lt;&amp;llm::tensor::Tensor as core::ops::arith::Mul&gt;::mul (2 samples, 0.01%)</title><rect x="83.0069%" y="149" width="0.0127%" height="15" fill="rgb(254,200,22)" fg:x="13052" fg:w="2"/><text x="83.2569%" y="159.50"></text></g><g><title>llm::tensor::&lt;impl core::ops::arith::Mul&lt;&amp;llm::tensor::Tensor&gt; for f32&gt;::mul (2 samples, 0.01%)</title><rect x="83.0196%" y="149" width="0.0127%" height="15" fill="rgb(219,10,39)" fg:x="13054" fg:w="2"/><text x="83.2696%" y="159.50"></text></g><g><title>&lt;llm::feed_forward::FeedForward as llm::modules::Module&gt;::forward (3,233 samples, 20.56%)</title><rect x="62.4777%" y="181" width="20.5609%" height="15" fill="rgb(226,210,39)" fg:x="9824" fg:w="3233"/><text x="62.7277%" y="191.50">&lt;llm::feed_forward::FeedForward ..</text></g><g><title>llm::modules::gelu (5 samples, 0.03%)</title><rect x="83.0069%" y="165" width="0.0318%" height="15" fill="rgb(208,219,16)" fg:x="13052" fg:w="5"/><text x="83.2569%" y="175.50"></text></g><g><title>llm::tensor::Tensor::matmul (1,148 samples, 7.30%)</title><rect x="83.0387%" y="149" width="7.3009%" height="15" fill="rgb(216,158,51)" fg:x="13057" fg:w="1148"/><text x="83.2887%" y="159.50">llm::tenso..</text></g><g><title>__GI___libc_free (19 samples, 0.12%)</title><rect x="90.7530%" y="133" width="0.1208%" height="15" fill="rgb(233,14,44)" fg:x="14270" fg:w="19"/><text x="91.0030%" y="143.50"></text></g><g><title>_int_free (14 samples, 0.09%)</title><rect x="90.7848%" y="117" width="0.0890%" height="15" fill="rgb(237,97,39)" fg:x="14275" fg:w="14"/><text x="91.0348%" y="127.50"></text></g><g><title>__libc_calloc (25 samples, 0.16%)</title><rect x="90.8738%" y="133" width="0.1590%" height="15" fill="rgb(218,198,43)" fg:x="14289" fg:w="25"/><text x="91.1238%" y="143.50"></text></g><g><title>_int_malloc (17 samples, 0.11%)</title><rect x="90.9247%" y="117" width="0.1081%" height="15" fill="rgb(231,104,20)" fg:x="14297" fg:w="17"/><text x="91.1747%" y="127.50"></text></g><g><title>__memset_avx2_unaligned_erms (2 samples, 0.01%)</title><rect x="91.0328%" y="133" width="0.0127%" height="15" fill="rgb(254,36,13)" fg:x="14314" fg:w="2"/><text x="91.2828%" y="143.50"></text></g><g><title>&lt;llm::linear::Linear as llm::modules::Module&gt;::forward (1,262 samples, 8.03%)</title><rect x="83.0387%" y="165" width="8.0259%" height="15" fill="rgb(248,14,50)" fg:x="13057" fg:w="1262"/><text x="83.2887%" y="175.50">&lt;llm::linea..</text></g><g><title>llm::tensor::Tensor::transpose (114 samples, 0.73%)</title><rect x="90.3396%" y="149" width="0.7250%" height="15" fill="rgb(217,107,29)" fg:x="14205" fg:w="114"/><text x="90.5896%" y="159.50"></text></g><g><title>__rustc::__rdl_alloc_zeroed (3 samples, 0.02%)</title><rect x="91.0455%" y="133" width="0.0191%" height="15" fill="rgb(251,169,33)" fg:x="14316" fg:w="3"/><text x="91.2955%" y="143.50"></text></g><g><title>__GI___libc_free (13 samples, 0.08%)</title><rect x="91.0964%" y="101" width="0.0827%" height="15" fill="rgb(217,108,32)" fg:x="14324" fg:w="13"/><text x="91.3464%" y="111.50"></text></g><g><title>_int_free (7 samples, 0.04%)</title><rect x="91.1346%" y="85" width="0.0445%" height="15" fill="rgb(219,66,42)" fg:x="14330" fg:w="7"/><text x="91.3846%" y="95.50"></text></g><g><title>__GI___libc_free (26 samples, 0.17%)</title><rect x="91.3890%" y="85" width="0.1654%" height="15" fill="rgb(206,180,7)" fg:x="14370" fg:w="26"/><text x="91.6390%" y="95.50"></text></g><g><title>_int_free (16 samples, 0.10%)</title><rect x="91.4526%" y="69" width="0.1018%" height="15" fill="rgb(208,226,31)" fg:x="14380" fg:w="16"/><text x="91.7026%" y="79.50"></text></g><g><title>__memmove_avx_unaligned_erms (2 samples, 0.01%)</title><rect x="91.5543%" y="85" width="0.0127%" height="15" fill="rgb(218,26,49)" fg:x="14396" fg:w="2"/><text x="91.8043%" y="95.50"></text></g><g><title>__rustc::__rdl_dealloc (2 samples, 0.01%)</title><rect x="91.5670%" y="85" width="0.0127%" height="15" fill="rgb(233,197,48)" fg:x="14398" fg:w="2"/><text x="91.8170%" y="95.50"></text></g><g><title>llm::tensor::compute_strides (20 samples, 0.13%)</title><rect x="91.5861%" y="85" width="0.1272%" height="15" fill="rgb(252,181,51)" fg:x="14401" fg:w="20"/><text x="91.8361%" y="95.50"></text></g><g><title>malloc (10 samples, 0.06%)</title><rect x="91.6497%" y="69" width="0.0636%" height="15" fill="rgb(253,90,19)" fg:x="14411" fg:w="10"/><text x="91.8997%" y="79.50"></text></g><g><title>llm::tensor::Tensor::get_broadcasted (87 samples, 0.55%)</title><rect x="91.1791%" y="101" width="0.5533%" height="15" fill="rgb(215,171,30)" fg:x="14337" fg:w="87"/><text x="91.4291%" y="111.50"></text></g><g><title>malloc (3 samples, 0.02%)</title><rect x="91.7133%" y="85" width="0.0191%" height="15" fill="rgb(214,222,9)" fg:x="14421" fg:w="3"/><text x="91.9633%" y="95.50"></text></g><g><title>llm::tensor::compute_strides (15 samples, 0.10%)</title><rect x="91.7324%" y="101" width="0.0954%" height="15" fill="rgb(223,3,22)" fg:x="14424" fg:w="15"/><text x="91.9824%" y="111.50"></text></g><g><title>malloc (6 samples, 0.04%)</title><rect x="91.7896%" y="85" width="0.0382%" height="15" fill="rgb(225,196,46)" fg:x="14433" fg:w="6"/><text x="92.0396%" y="95.50"></text></g><g><title>__libc_calloc (9 samples, 0.06%)</title><rect x="92.1012%" y="85" width="0.0572%" height="15" fill="rgb(209,110,37)" fg:x="14482" fg:w="9"/><text x="92.3512%" y="95.50"></text></g><g><title>_int_malloc (3 samples, 0.02%)</title><rect x="92.1394%" y="69" width="0.0191%" height="15" fill="rgb(249,89,12)" fg:x="14488" fg:w="3"/><text x="92.3894%" y="79.50"></text></g><g><title>&lt;&amp;llm::tensor::Tensor as core::ops::arith::Mul&gt;::mul (174 samples, 1.11%)</title><rect x="91.0646%" y="149" width="1.1066%" height="15" fill="rgb(226,27,33)" fg:x="14319" fg:w="174"/><text x="91.3146%" y="159.50"></text></g><g><title>&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter::SpecFromIter&lt;T,I&gt;&gt;::from_iter (174 samples, 1.11%)</title><rect x="91.0646%" y="133" width="1.1066%" height="15" fill="rgb(213,82,22)" fg:x="14319" fg:w="174"/><text x="91.3146%" y="143.50"></text></g><g><title>&lt;core::iter::adapters::map::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::fold (174 samples, 1.11%)</title><rect x="91.0646%" y="117" width="1.1066%" height="15" fill="rgb(248,140,0)" fg:x="14319" fg:w="174"/><text x="91.3146%" y="127.50"></text></g><g><title>llm::tensor::unravel_index (54 samples, 0.34%)</title><rect x="91.8278%" y="101" width="0.3434%" height="15" fill="rgb(228,106,3)" fg:x="14439" fg:w="54"/><text x="92.0778%" y="111.50"></text></g><g><title>__rustc::__rdl_alloc_zeroed (2 samples, 0.01%)</title><rect x="92.1585%" y="85" width="0.0127%" height="15" fill="rgb(209,23,37)" fg:x="14491" fg:w="2"/><text x="92.4085%" y="95.50"></text></g><g><title>&lt;llm::rms_norm::RMSNorm as llm::modules::Module&gt;::forward (177 samples, 1.13%)</title><rect x="91.0646%" y="165" width="1.1257%" height="15" fill="rgb(241,93,50)" fg:x="14319" fg:w="177"/><text x="91.3146%" y="175.50"></text></g><g><title>llm::tensor::Tensor::powf (3 samples, 0.02%)</title><rect x="92.1712%" y="149" width="0.0191%" height="15" fill="rgb(253,46,43)" fg:x="14493" fg:w="3"/><text x="92.4212%" y="159.50"></text></g><g><title>__powf_fma (2 samples, 0.01%)</title><rect x="92.1776%" y="133" width="0.0127%" height="15" fill="rgb(226,206,43)" fg:x="14494" fg:w="2"/><text x="92.4276%" y="143.50"></text></g><g><title>&lt;&amp;llm::tensor::Tensor as core::ops::arith::Add&gt;::add (2 samples, 0.01%)</title><rect x="92.1903%" y="149" width="0.0127%" height="15" fill="rgb(217,54,7)" fg:x="14496" fg:w="2"/><text x="92.4403%" y="159.50"></text></g><g><title>__GI___libc_free (7 samples, 0.04%)</title><rect x="92.2539%" y="101" width="0.0445%" height="15" fill="rgb(223,5,52)" fg:x="14506" fg:w="7"/><text x="92.5039%" y="111.50"></text></g><g><title>_int_free (7 samples, 0.04%)</title><rect x="92.2539%" y="85" width="0.0445%" height="15" fill="rgb(206,52,46)" fg:x="14506" fg:w="7"/><text x="92.5039%" y="95.50"></text></g><g><title>__rustc::__rdl_dealloc (2 samples, 0.01%)</title><rect x="92.2984%" y="101" width="0.0127%" height="15" fill="rgb(253,136,11)" fg:x="14513" fg:w="2"/><text x="92.5484%" y="111.50"></text></g><g><title>__GI___libc_free (26 samples, 0.17%)</title><rect x="92.4892%" y="85" width="0.1654%" height="15" fill="rgb(208,106,33)" fg:x="14543" fg:w="26"/><text x="92.7392%" y="95.50"></text></g><g><title>_int_free (15 samples, 0.10%)</title><rect x="92.5591%" y="69" width="0.0954%" height="15" fill="rgb(206,54,4)" fg:x="14554" fg:w="15"/><text x="92.8091%" y="79.50"></text></g><g><title>__rustc::__rdl_alloc (2 samples, 0.01%)</title><rect x="92.6545%" y="85" width="0.0127%" height="15" fill="rgb(213,3,15)" fg:x="14569" fg:w="2"/><text x="92.9045%" y="95.50"></text></g><g><title>llm::tensor::compute_strides (20 samples, 0.13%)</title><rect x="92.6736%" y="85" width="0.1272%" height="15" fill="rgb(252,211,39)" fg:x="14572" fg:w="20"/><text x="92.9236%" y="95.50"></text></g><g><title>malloc (8 samples, 0.05%)</title><rect x="92.7499%" y="69" width="0.0509%" height="15" fill="rgb(223,6,36)" fg:x="14584" fg:w="8"/><text x="92.9999%" y="79.50"></text></g><g><title>llm::tensor::Tensor::get_broadcasted (85 samples, 0.54%)</title><rect x="92.3111%" y="101" width="0.5406%" height="15" fill="rgb(252,169,45)" fg:x="14515" fg:w="85"/><text x="92.5611%" y="111.50"></text></g><g><title>malloc (8 samples, 0.05%)</title><rect x="92.8008%" y="85" width="0.0509%" height="15" fill="rgb(212,48,26)" fg:x="14592" fg:w="8"/><text x="93.0508%" y="95.50"></text></g><g><title>llm::tensor::compute_strides (8 samples, 0.05%)</title><rect x="92.8517%" y="101" width="0.0509%" height="15" fill="rgb(251,102,48)" fg:x="14600" fg:w="8"/><text x="93.1017%" y="111.50"></text></g><g><title>malloc (2 samples, 0.01%)</title><rect x="92.8898%" y="85" width="0.0127%" height="15" fill="rgb(243,208,16)" fg:x="14606" fg:w="2"/><text x="93.1398%" y="95.50"></text></g><g><title>&lt;&amp;llm::tensor::Tensor as core::ops::arith::Mul&gt;::mul (142 samples, 0.90%)</title><rect x="92.2030%" y="149" width="0.9031%" height="15" fill="rgb(219,96,24)" fg:x="14498" fg:w="142"/><text x="92.4530%" y="159.50"></text></g><g><title>&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter::SpecFromIter&lt;T,I&gt;&gt;::from_iter (142 samples, 0.90%)</title><rect x="92.2030%" y="133" width="0.9031%" height="15" fill="rgb(219,33,29)" fg:x="14498" fg:w="142"/><text x="92.4530%" y="143.50"></text></g><g><title>&lt;core::iter::adapters::map::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::fold (142 samples, 0.90%)</title><rect x="92.2030%" y="117" width="0.9031%" height="15" fill="rgb(223,176,5)" fg:x="14498" fg:w="142"/><text x="92.4530%" y="127.50"></text></g><g><title>llm::tensor::unravel_index (32 samples, 0.20%)</title><rect x="92.9026%" y="101" width="0.2035%" height="15" fill="rgb(228,140,14)" fg:x="14608" fg:w="32"/><text x="93.1526%" y="111.50"></text></g><g><title>__libc_calloc (7 samples, 0.04%)</title><rect x="93.0616%" y="85" width="0.0445%" height="15" fill="rgb(217,179,31)" fg:x="14633" fg:w="7"/><text x="93.3116%" y="95.50"></text></g><g><title>_int_malloc (4 samples, 0.03%)</title><rect x="93.0806%" y="69" width="0.0254%" height="15" fill="rgb(230,9,30)" fg:x="14636" fg:w="4"/><text x="93.3306%" y="79.50"></text></g><g><title>__GI___libc_free (4 samples, 0.03%)</title><rect x="93.1951%" y="53" width="0.0254%" height="15" fill="rgb(230,136,20)" fg:x="14654" fg:w="4"/><text x="93.4451%" y="63.50"></text></g><g><title>_int_free (3 samples, 0.02%)</title><rect x="93.2015%" y="37" width="0.0191%" height="15" fill="rgb(215,210,22)" fg:x="14655" fg:w="3"/><text x="93.4515%" y="47.50"></text></g><g><title>llm::tensor::Tensor::extract_slice (20 samples, 0.13%)</title><rect x="93.1315%" y="85" width="0.1272%" height="15" fill="rgb(218,43,5)" fg:x="14644" fg:w="20"/><text x="93.3815%" y="95.50"></text></g><g><title>llm::tensor::Tensor::extract_slice (19 samples, 0.12%)</title><rect x="93.1379%" y="69" width="0.1208%" height="15" fill="rgb(216,11,5)" fg:x="14645" fg:w="19"/><text x="93.3879%" y="79.50"></text></g><g><title>llm::tensor::compute_strides (6 samples, 0.04%)</title><rect x="93.2206%" y="53" width="0.0382%" height="15" fill="rgb(209,82,29)" fg:x="14658" fg:w="6"/><text x="93.4706%" y="63.50"></text></g><g><title>malloc (2 samples, 0.01%)</title><rect x="93.2460%" y="37" width="0.0127%" height="15" fill="rgb(244,115,12)" fg:x="14662" fg:w="2"/><text x="93.4960%" y="47.50"></text></g><g><title>llm::rope::Rope::apply (171 samples, 1.09%)</title><rect x="92.1903%" y="165" width="1.0875%" height="15" fill="rgb(222,82,18)" fg:x="14496" fg:w="171"/><text x="92.4403%" y="175.50"></text></g><g><title>llm::tensor::Tensor::slice (26 samples, 0.17%)</title><rect x="93.1124%" y="149" width="0.1654%" height="15" fill="rgb(249,227,8)" fg:x="14641" fg:w="26"/><text x="93.3624%" y="159.50"></text></g><g><title>llm::tensor::Tensor::extract_slice (26 samples, 0.17%)</title><rect x="93.1124%" y="133" width="0.1654%" height="15" fill="rgb(253,141,45)" fg:x="14641" fg:w="26"/><text x="93.3624%" y="143.50"></text></g><g><title>llm::tensor::Tensor::extract_slice (26 samples, 0.17%)</title><rect x="93.1124%" y="117" width="0.1654%" height="15" fill="rgb(234,184,4)" fg:x="14641" fg:w="26"/><text x="93.3624%" y="127.50"></text></g><g><title>llm::tensor::Tensor::extract_slice (24 samples, 0.15%)</title><rect x="93.1252%" y="101" width="0.1526%" height="15" fill="rgb(218,194,23)" fg:x="14643" fg:w="24"/><text x="93.3752%" y="111.50"></text></g><g><title>llm::tensor::compute_strides (3 samples, 0.02%)</title><rect x="93.2587%" y="85" width="0.0191%" height="15" fill="rgb(235,66,41)" fg:x="14664" fg:w="3"/><text x="93.5087%" y="95.50"></text></g><g><title>__GI___libc_free (10 samples, 0.06%)</title><rect x="93.3223%" y="149" width="0.0636%" height="15" fill="rgb(245,217,1)" fg:x="14674" fg:w="10"/><text x="93.5723%" y="159.50"></text></g><g><title>_int_free (5 samples, 0.03%)</title><rect x="93.3541%" y="133" width="0.0318%" height="15" fill="rgb(229,91,1)" fg:x="14679" fg:w="5"/><text x="93.6041%" y="143.50"></text></g><g><title>llm::tensor::unravel_index (19 samples, 0.12%)</title><rect x="93.3859%" y="149" width="0.1208%" height="15" fill="rgb(207,101,30)" fg:x="14684" fg:w="19"/><text x="93.6359%" y="159.50"></text></g><g><title>__libc_calloc (7 samples, 0.04%)</title><rect x="93.4622%" y="133" width="0.0445%" height="15" fill="rgb(223,82,49)" fg:x="14696" fg:w="7"/><text x="93.7122%" y="143.50"></text></g><g><title>_int_malloc (4 samples, 0.03%)</title><rect x="93.4813%" y="117" width="0.0254%" height="15" fill="rgb(218,167,17)" fg:x="14699" fg:w="4"/><text x="93.7313%" y="127.50"></text></g><g><title>llm::tensor::Tensor::masked_fill (38 samples, 0.24%)</title><rect x="93.2778%" y="165" width="0.2417%" height="15" fill="rgb(208,103,14)" fg:x="14667" fg:w="38"/><text x="93.5278%" y="175.50"></text></g><g><title>malloc (2 samples, 0.01%)</title><rect x="93.5067%" y="149" width="0.0127%" height="15" fill="rgb(238,20,8)" fg:x="14703" fg:w="2"/><text x="93.7567%" y="159.50"></text></g><g><title>llm::tensor::Tensor::matmul (259 samples, 1.65%)</title><rect x="93.5195%" y="165" width="1.6472%" height="15" fill="rgb(218,80,54)" fg:x="14705" fg:w="259"/><text x="93.7695%" y="175.50"></text></g><g><title>__GI___libc_free (7 samples, 0.04%)</title><rect x="95.2557%" y="149" width="0.0445%" height="15" fill="rgb(240,144,17)" fg:x="14978" fg:w="7"/><text x="95.5057%" y="159.50"></text></g><g><title>_int_free (4 samples, 0.03%)</title><rect x="95.2747%" y="133" width="0.0254%" height="15" fill="rgb(245,27,50)" fg:x="14981" fg:w="4"/><text x="95.5247%" y="143.50"></text></g><g><title>__libc_calloc (2 samples, 0.01%)</title><rect x="95.3511%" y="133" width="0.0127%" height="15" fill="rgb(251,51,7)" fg:x="14993" fg:w="2"/><text x="95.6011%" y="143.50"></text></g><g><title>llm::tensor::unravel_index (10 samples, 0.06%)</title><rect x="95.3065%" y="149" width="0.0636%" height="15" fill="rgb(245,217,29)" fg:x="14986" fg:w="10"/><text x="95.5565%" y="159.50"></text></g><g><title>llm::tensor::Tensor::repeat_interleave (33 samples, 0.21%)</title><rect x="95.1666%" y="165" width="0.2099%" height="15" fill="rgb(221,176,29)" fg:x="14964" fg:w="33"/><text x="95.4166%" y="175.50"></text></g><g><title>__GI___libc_free (3 samples, 0.02%)</title><rect x="95.3892%" y="101" width="0.0191%" height="15" fill="rgb(212,180,24)" fg:x="14999" fg:w="3"/><text x="95.6392%" y="111.50"></text></g><g><title>_int_free (2 samples, 0.01%)</title><rect x="95.3956%" y="85" width="0.0127%" height="15" fill="rgb(254,24,2)" fg:x="15000" fg:w="2"/><text x="95.6456%" y="95.50"></text></g><g><title>__GI___libc_free (10 samples, 0.06%)</title><rect x="95.5100%" y="85" width="0.0636%" height="15" fill="rgb(230,100,2)" fg:x="15018" fg:w="10"/><text x="95.7600%" y="95.50"></text></g><g><title>_int_free (8 samples, 0.05%)</title><rect x="95.5228%" y="69" width="0.0509%" height="15" fill="rgb(219,142,25)" fg:x="15020" fg:w="8"/><text x="95.7728%" y="79.50"></text></g><g><title>__rustc::__rdl_alloc (2 samples, 0.01%)</title><rect x="95.5800%" y="85" width="0.0127%" height="15" fill="rgb(240,73,43)" fg:x="15029" fg:w="2"/><text x="95.8300%" y="95.50"></text></g><g><title>llm::tensor::compute_strides (16 samples, 0.10%)</title><rect x="95.5991%" y="85" width="0.1018%" height="15" fill="rgb(214,114,15)" fg:x="15032" fg:w="16"/><text x="95.8491%" y="95.50"></text></g><g><title>malloc (9 samples, 0.06%)</title><rect x="95.6436%" y="69" width="0.0572%" height="15" fill="rgb(207,130,4)" fg:x="15039" fg:w="9"/><text x="95.8936%" y="79.50"></text></g><g><title>llm::tensor::Tensor::get_broadcasted (48 samples, 0.31%)</title><rect x="95.4083%" y="101" width="0.3053%" height="15" fill="rgb(221,25,40)" fg:x="15002" fg:w="48"/><text x="95.6583%" y="111.50"></text></g><g><title>malloc (2 samples, 0.01%)</title><rect x="95.7008%" y="85" width="0.0127%" height="15" fill="rgb(241,184,7)" fg:x="15048" fg:w="2"/><text x="95.9508%" y="95.50"></text></g><g><title>llm::tensor::compute_strides (7 samples, 0.04%)</title><rect x="95.7136%" y="101" width="0.0445%" height="15" fill="rgb(235,159,4)" fg:x="15050" fg:w="7"/><text x="95.9636%" y="111.50"></text></g><g><title>malloc (2 samples, 0.01%)</title><rect x="95.7454%" y="85" width="0.0127%" height="15" fill="rgb(214,87,48)" fg:x="15055" fg:w="2"/><text x="95.9954%" y="95.50"></text></g><g><title>&lt;&amp;llm::tensor::Tensor as core::ops::arith::Div&gt;::div (72 samples, 0.46%)</title><rect x="95.3765%" y="149" width="0.4579%" height="15" fill="rgb(246,198,24)" fg:x="14997" fg:w="72"/><text x="95.6265%" y="159.50"></text></g><g><title>&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter::SpecFromIter&lt;T,I&gt;&gt;::from_iter (72 samples, 0.46%)</title><rect x="95.3765%" y="133" width="0.4579%" height="15" fill="rgb(209,66,40)" fg:x="14997" fg:w="72"/><text x="95.6265%" y="143.50"></text></g><g><title>&lt;core::iter::adapters::map::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::fold (72 samples, 0.46%)</title><rect x="95.3765%" y="117" width="0.4579%" height="15" fill="rgb(233,147,39)" fg:x="14997" fg:w="72"/><text x="95.6265%" y="127.50"></text></g><g><title>llm::tensor::unravel_index (12 samples, 0.08%)</title><rect x="95.7581%" y="101" width="0.0763%" height="15" fill="rgb(231,145,52)" fg:x="15057" fg:w="12"/><text x="96.0081%" y="111.50"></text></g><g><title>__libc_calloc (3 samples, 0.02%)</title><rect x="95.8153%" y="85" width="0.0191%" height="15" fill="rgb(206,20,26)" fg:x="15066" fg:w="3"/><text x="96.0653%" y="95.50"></text></g><g><title>__GI___libc_free (9 samples, 0.06%)</title><rect x="95.8408%" y="101" width="0.0572%" height="15" fill="rgb(238,220,4)" fg:x="15070" fg:w="9"/><text x="96.0908%" y="111.50"></text></g><g><title>_int_free (6 samples, 0.04%)</title><rect x="95.8598%" y="85" width="0.0382%" height="15" fill="rgb(252,195,42)" fg:x="15073" fg:w="6"/><text x="96.1098%" y="95.50"></text></g><g><title>__GI___libc_free (8 samples, 0.05%)</title><rect x="95.9934%" y="85" width="0.0509%" height="15" fill="rgb(209,10,6)" fg:x="15094" fg:w="8"/><text x="96.2434%" y="95.50"></text></g><g><title>_int_free (8 samples, 0.05%)</title><rect x="95.9934%" y="69" width="0.0509%" height="15" fill="rgb(229,3,52)" fg:x="15094" fg:w="8"/><text x="96.2434%" y="79.50"></text></g><g><title>llm::tensor::compute_strides (5 samples, 0.03%)</title><rect x="96.0570%" y="85" width="0.0318%" height="15" fill="rgb(253,49,37)" fg:x="15104" fg:w="5"/><text x="96.3070%" y="95.50"></text></g><g><title>llm::tensor::Tensor::get_broadcasted (33 samples, 0.21%)</title><rect x="95.8980%" y="101" width="0.2099%" height="15" fill="rgb(240,103,49)" fg:x="15079" fg:w="33"/><text x="96.1480%" y="111.50"></text></g><g><title>malloc (3 samples, 0.02%)</title><rect x="96.0888%" y="85" width="0.0191%" height="15" fill="rgb(250,182,30)" fg:x="15109" fg:w="3"/><text x="96.3388%" y="95.50"></text></g><g><title>llm::tensor::compute_strides (5 samples, 0.03%)</title><rect x="96.1079%" y="101" width="0.0318%" height="15" fill="rgb(248,8,30)" fg:x="15112" fg:w="5"/><text x="96.3579%" y="111.50"></text></g><g><title>__libc_calloc (3 samples, 0.02%)</title><rect x="96.2605%" y="85" width="0.0191%" height="15" fill="rgb(237,120,30)" fg:x="15136" fg:w="3"/><text x="96.5105%" y="95.50"></text></g><g><title>&lt;&amp;llm::tensor::Tensor as core::ops::arith::Sub&gt;::sub (71 samples, 0.45%)</title><rect x="95.8344%" y="149" width="0.4515%" height="15" fill="rgb(221,146,34)" fg:x="15069" fg:w="71"/><text x="96.0844%" y="159.50"></text></g><g><title>&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter::SpecFromIter&lt;T,I&gt;&gt;::from_iter (71 samples, 0.45%)</title><rect x="95.8344%" y="133" width="0.4515%" height="15" fill="rgb(242,55,13)" fg:x="15069" fg:w="71"/><text x="96.0844%" y="143.50"></text></g><g><title>&lt;core::iter::adapters::map::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::fold (71 samples, 0.45%)</title><rect x="95.8344%" y="117" width="0.4515%" height="15" fill="rgb(242,112,31)" fg:x="15069" fg:w="71"/><text x="96.0844%" y="127.50"></text></g><g><title>llm::tensor::unravel_index (23 samples, 0.15%)</title><rect x="96.1397%" y="101" width="0.1463%" height="15" fill="rgb(249,192,27)" fg:x="15117" fg:w="23"/><text x="96.3897%" y="111.50"></text></g><g><title>__GI___libc_free (11 samples, 0.07%)</title><rect x="96.3305%" y="133" width="0.0700%" height="15" fill="rgb(208,204,44)" fg:x="15147" fg:w="11"/><text x="96.5805%" y="143.50"></text></g><g><title>_int_free (7 samples, 0.04%)</title><rect x="96.3559%" y="117" width="0.0445%" height="15" fill="rgb(208,93,54)" fg:x="15151" fg:w="7"/><text x="96.6059%" y="127.50"></text></g><g><title>llm::tensor::unravel_index (13 samples, 0.08%)</title><rect x="96.4068%" y="133" width="0.0827%" height="15" fill="rgb(242,1,31)" fg:x="15159" fg:w="13"/><text x="96.6568%" y="143.50"></text></g><g><title>__rustc::__rdl_alloc_zeroed (3 samples, 0.02%)</title><rect x="96.4704%" y="117" width="0.0191%" height="15" fill="rgb(241,83,25)" fg:x="15169" fg:w="3"/><text x="96.7204%" y="127.50"></text></g><g><title>llm::tensor::Tensor::max_dim (35 samples, 0.22%)</title><rect x="96.2923%" y="149" width="0.2226%" height="15" fill="rgb(205,169,50)" fg:x="15141" fg:w="35"/><text x="96.5423%" y="159.50"></text></g><g><title>malloc (4 samples, 0.03%)</title><rect x="96.4894%" y="133" width="0.0254%" height="15" fill="rgb(239,186,37)" fg:x="15172" fg:w="4"/><text x="96.7394%" y="143.50"></text></g><g><title>__libc_calloc (7 samples, 0.04%)</title><rect x="96.6357%" y="117" width="0.0445%" height="15" fill="rgb(205,221,10)" fg:x="15195" fg:w="7"/><text x="96.8857%" y="127.50"></text></g><g><title>_int_malloc (5 samples, 0.03%)</title><rect x="96.6484%" y="101" width="0.0318%" height="15" fill="rgb(218,196,15)" fg:x="15197" fg:w="5"/><text x="96.8984%" y="111.50"></text></g><g><title>llm::tensor::unravel_index (20 samples, 0.13%)</title><rect x="96.5594%" y="133" width="0.1272%" height="15" fill="rgb(218,196,35)" fg:x="15183" fg:w="20"/><text x="96.8094%" y="143.50"></text></g><g><title>llm::tensor::Tensor::sum_dim (29 samples, 0.18%)</title><rect x="96.5149%" y="149" width="0.1844%" height="15" fill="rgb(233,63,24)" fg:x="15176" fg:w="29"/><text x="96.7649%" y="159.50"></text></g><g><title>malloc (2 samples, 0.01%)</title><rect x="96.6866%" y="133" width="0.0127%" height="15" fill="rgb(225,8,4)" fg:x="15203" fg:w="2"/><text x="96.9366%" y="143.50"></text></g><g><title>llm::tensor::Tensor::softmax (209 samples, 1.33%)</title><rect x="95.3765%" y="165" width="1.3292%" height="15" fill="rgb(234,105,35)" fg:x="14997" fg:w="209"/><text x="95.6265%" y="175.50"></text></g><g><title>__GI___libc_free (12 samples, 0.08%)</title><rect x="97.0491%" y="149" width="0.0763%" height="15" fill="rgb(236,21,32)" fg:x="15260" fg:w="12"/><text x="97.2991%" y="159.50"></text></g><g><title>_int_free (8 samples, 0.05%)</title><rect x="97.0745%" y="133" width="0.0509%" height="15" fill="rgb(228,109,6)" fg:x="15264" fg:w="8"/><text x="97.3245%" y="143.50"></text></g><g><title>__libc_calloc (18 samples, 0.11%)</title><rect x="97.1254%" y="149" width="0.1145%" height="15" fill="rgb(229,215,31)" fg:x="15272" fg:w="18"/><text x="97.3754%" y="159.50"></text></g><g><title>_int_malloc (6 samples, 0.04%)</title><rect x="97.2017%" y="133" width="0.0382%" height="15" fill="rgb(221,52,54)" fg:x="15284" fg:w="6"/><text x="97.4517%" y="143.50"></text></g><g><title>__rustc::__rdl_alloc_zeroed (2 samples, 0.01%)</title><rect x="97.2462%" y="149" width="0.0127%" height="15" fill="rgb(252,129,43)" fg:x="15291" fg:w="2"/><text x="97.4962%" y="159.50"></text></g><g><title>&lt;llm::grouped_query_attention::GroupedQueryAttention as llm::modules::Module&gt;::forward (2,237 samples, 14.23%)</title><rect x="83.0387%" y="181" width="14.2267%" height="15" fill="rgb(248,183,27)" fg:x="13057" fg:w="2237"/><text x="83.2887%" y="191.50">&lt;llm::grouped_query_at..</text></g><g><title>llm::tensor::Tensor::transpose (88 samples, 0.56%)</title><rect x="96.7057%" y="165" width="0.5597%" height="15" fill="rgb(250,0,22)" fg:x="15206" fg:w="88"/><text x="96.9557%" y="175.50"></text></g><g><title>__GI___libc_free (31 samples, 0.20%)</title><rect x="97.3480%" y="117" width="0.1972%" height="15" fill="rgb(213,166,10)" fg:x="15307" fg:w="31"/><text x="97.5980%" y="127.50"></text></g><g><title>_int_free (22 samples, 0.14%)</title><rect x="97.4052%" y="101" width="0.1399%" height="15" fill="rgb(207,163,36)" fg:x="15316" fg:w="22"/><text x="97.6552%" y="111.50"></text></g><g><title>__rustc::__rdl_dealloc (2 samples, 0.01%)</title><rect x="97.5452%" y="117" width="0.0127%" height="15" fill="rgb(208,122,22)" fg:x="15338" fg:w="2"/><text x="97.7952%" y="127.50"></text></g><g><title>__GI___libc_free (54 samples, 0.34%)</title><rect x="97.8504%" y="101" width="0.3434%" height="15" fill="rgb(207,104,49)" fg:x="15386" fg:w="54"/><text x="98.1004%" y="111.50"></text></g><g><title>_int_free (28 samples, 0.18%)</title><rect x="98.0158%" y="85" width="0.1781%" height="15" fill="rgb(248,211,50)" fg:x="15412" fg:w="28"/><text x="98.2658%" y="95.50"></text></g><g><title>__memmove_avx_unaligned_erms (3 samples, 0.02%)</title><rect x="98.1938%" y="101" width="0.0191%" height="15" fill="rgb(217,13,45)" fg:x="15440" fg:w="3"/><text x="98.4438%" y="111.50"></text></g><g><title>__rustc::__rdl_alloc (3 samples, 0.02%)</title><rect x="98.2129%" y="101" width="0.0191%" height="15" fill="rgb(211,216,49)" fg:x="15443" fg:w="3"/><text x="98.4629%" y="111.50"></text></g><g><title>__rustc::__rdl_dealloc (3 samples, 0.02%)</title><rect x="98.2320%" y="101" width="0.0191%" height="15" fill="rgb(221,58,53)" fg:x="15446" fg:w="3"/><text x="98.4820%" y="111.50"></text></g><g><title>__rustc::__rdl_alloc (2 samples, 0.01%)</title><rect x="98.3719%" y="85" width="0.0127%" height="15" fill="rgb(220,112,41)" fg:x="15468" fg:w="2"/><text x="98.6219%" y="95.50"></text></g><g><title>llm::tensor::compute_strides (41 samples, 0.26%)</title><rect x="98.2574%" y="101" width="0.2607%" height="15" fill="rgb(236,38,28)" fg:x="15450" fg:w="41"/><text x="98.5074%" y="111.50"></text></g><g><title>malloc (21 samples, 0.13%)</title><rect x="98.3846%" y="85" width="0.1336%" height="15" fill="rgb(227,195,22)" fg:x="15470" fg:w="21"/><text x="98.6346%" y="95.50"></text></g><g><title>llm::tensor::Tensor::get_broadcasted (165 samples, 1.05%)</title><rect x="97.5579%" y="117" width="1.0494%" height="15" fill="rgb(214,55,33)" fg:x="15340" fg:w="165"/><text x="97.8079%" y="127.50"></text></g><g><title>malloc (14 samples, 0.09%)</title><rect x="98.5182%" y="101" width="0.0890%" height="15" fill="rgb(248,80,13)" fg:x="15491" fg:w="14"/><text x="98.7682%" y="111.50"></text></g><g><title>__rustc::__rdl_alloc (2 samples, 0.01%)</title><rect x="98.7153%" y="101" width="0.0127%" height="15" fill="rgb(238,52,6)" fg:x="15522" fg:w="2"/><text x="98.9653%" y="111.50"></text></g><g><title>llm::tensor::compute_strides (36 samples, 0.23%)</title><rect x="98.6072%" y="117" width="0.2289%" height="15" fill="rgb(224,198,47)" fg:x="15505" fg:w="36"/><text x="98.8572%" y="127.50"></text></g><g><title>malloc (17 samples, 0.11%)</title><rect x="98.7281%" y="101" width="0.1081%" height="15" fill="rgb(233,171,20)" fg:x="15524" fg:w="17"/><text x="98.9781%" y="111.50"></text></g><g><title>__libc_calloc (21 samples, 0.13%)</title><rect x="99.1351%" y="101" width="0.1336%" height="15" fill="rgb(241,30,25)" fg:x="15588" fg:w="21"/><text x="99.3851%" y="111.50"></text></g><g><title>_int_malloc (13 samples, 0.08%)</title><rect x="99.1860%" y="85" width="0.0827%" height="15" fill="rgb(207,171,38)" fg:x="15596" fg:w="13"/><text x="99.4360%" y="95.50"></text></g><g><title>&lt;&amp;llm::tensor::Tensor as core::ops::arith::Mul&gt;::mul (317 samples, 2.02%)</title><rect x="97.2653%" y="165" width="2.0160%" height="15" fill="rgb(234,70,1)" fg:x="15294" fg:w="317"/><text x="97.5153%" y="175.50">&lt;..</text></g><g><title>&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter::SpecFromIter&lt;T,I&gt;&gt;::from_iter (317 samples, 2.02%)</title><rect x="97.2653%" y="149" width="2.0160%" height="15" fill="rgb(232,178,18)" fg:x="15294" fg:w="317"/><text x="97.5153%" y="159.50">&lt;..</text></g><g><title>&lt;core::iter::adapters::map::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::fold (317 samples, 2.02%)</title><rect x="97.2653%" y="133" width="2.0160%" height="15" fill="rgb(241,78,40)" fg:x="15294" fg:w="317"/><text x="97.5153%" y="143.50">&lt;..</text></g><g><title>llm::tensor::unravel_index (70 samples, 0.45%)</title><rect x="98.8362%" y="117" width="0.4452%" height="15" fill="rgb(222,35,25)" fg:x="15541" fg:w="70"/><text x="99.0862%" y="127.50"></text></g><g><title>__rustc::__rdl_alloc_zeroed (2 samples, 0.01%)</title><rect x="99.2686%" y="101" width="0.0127%" height="15" fill="rgb(207,92,16)" fg:x="15609" fg:w="2"/><text x="99.5186%" y="111.50"></text></g><g><title>llm::tensor::Tensor::mean (3 samples, 0.02%)</title><rect x="99.2814%" y="165" width="0.0191%" height="15" fill="rgb(216,59,51)" fg:x="15611" fg:w="3"/><text x="99.5314%" y="175.50"></text></g><g><title>&lt;llm::transformer_block::TransformerBlock as llm::modules::Module&gt;::forward (5,800 samples, 36.89%)</title><rect x="62.4777%" y="197" width="36.8863%" height="15" fill="rgb(213,80,28)" fg:x="9824" fg:w="5800"/><text x="62.7277%" y="207.50">&lt;llm::transformer_block::TransformerBlock as llm::modules::M..</text></g><g><title>&lt;llm::rms_norm::RMSNorm as llm::modules::Module&gt;::forward (330 samples, 2.10%)</title><rect x="97.2653%" y="181" width="2.0987%" height="15" fill="rgb(220,93,7)" fg:x="15294" fg:w="330"/><text x="97.5153%" y="191.50">&lt;..</text></g><g><title>llm::tensor::Tensor::powf (10 samples, 0.06%)</title><rect x="99.3004%" y="165" width="0.0636%" height="15" fill="rgb(225,24,44)" fg:x="15614" fg:w="10"/><text x="99.5504%" y="175.50"></text></g><g><title>__powf_fma (6 samples, 0.04%)</title><rect x="99.3259%" y="149" width="0.0382%" height="15" fill="rgb(243,74,40)" fg:x="15618" fg:w="6"/><text x="99.5759%" y="159.50"></text></g><g><title>__memset_avx2_unaligned_erms (3 samples, 0.02%)</title><rect x="99.4213%" y="149" width="0.0191%" height="15" fill="rgb(228,39,7)" fg:x="15633" fg:w="3"/><text x="99.6713%" y="159.50"></text></g><g><title>&lt;llm::feed_forward::FeedForward as llm::modules::Module&gt;::init (20 samples, 0.13%)</title><rect x="99.3640%" y="181" width="0.1272%" height="15" fill="rgb(227,79,8)" fg:x="15624" fg:w="20"/><text x="99.6140%" y="191.50"></text></g><g><title>llm::tensor::Tensor::rand (20 samples, 0.13%)</title><rect x="99.3640%" y="165" width="0.1272%" height="15" fill="rgb(236,58,11)" fg:x="15624" fg:w="20"/><text x="99.6140%" y="175.50"></text></g><g><title>rand_chacha::guts::refill_wide::impl_avx2 (8 samples, 0.05%)</title><rect x="99.4403%" y="149" width="0.0509%" height="15" fill="rgb(249,63,35)" fg:x="15636" fg:w="8"/><text x="99.6903%" y="159.50"></text></g><g><title>&lt;llm::transformer_block::TransformerBlock as llm::modules::Module&gt;::init (25 samples, 0.16%)</title><rect x="99.3640%" y="197" width="0.1590%" height="15" fill="rgb(252,114,16)" fg:x="15624" fg:w="25"/><text x="99.6140%" y="207.50"></text></g><g><title>&lt;llm::grouped_query_attention::GroupedQueryAttention as llm::modules::Module&gt;::init (5 samples, 0.03%)</title><rect x="99.4912%" y="181" width="0.0318%" height="15" fill="rgb(254,151,24)" fg:x="15644" fg:w="5"/><text x="99.7412%" y="191.50"></text></g><g><title>llm::tensor::Tensor::rand (5 samples, 0.03%)</title><rect x="99.4912%" y="165" width="0.0318%" height="15" fill="rgb(253,54,39)" fg:x="15644" fg:w="5"/><text x="99.7412%" y="175.50"></text></g><g><title>rand_chacha::guts::refill_wide::impl_avx2 (3 samples, 0.02%)</title><rect x="99.5039%" y="149" width="0.0191%" height="15" fill="rgb(243,25,45)" fg:x="15646" fg:w="3"/><text x="99.7539%" y="159.50"></text></g><g><title>__GI___libc_free (4 samples, 0.03%)</title><rect x="99.5230%" y="197" width="0.0254%" height="15" fill="rgb(234,134,9)" fg:x="15649" fg:w="4"/><text x="99.7730%" y="207.50"></text></g><g><title>__GI___munmap (4 samples, 0.03%)</title><rect x="99.5230%" y="181" width="0.0254%" height="15" fill="rgb(227,166,31)" fg:x="15649" fg:w="4"/><text x="99.7730%" y="191.50"></text></g><g><title>__GI___libc_free (18 samples, 0.11%)</title><rect x="99.6184%" y="133" width="0.1145%" height="15" fill="rgb(245,143,41)" fg:x="15664" fg:w="18"/><text x="99.8684%" y="143.50"></text></g><g><title>_int_free (10 samples, 0.06%)</title><rect x="99.6693%" y="117" width="0.0636%" height="15" fill="rgb(238,181,32)" fg:x="15672" fg:w="10"/><text x="99.9193%" y="127.50"></text></g><g><title>alloc::raw_vec::RawVecInner&lt;A&gt;::reserve::do_reserve_and_handle (4 samples, 0.03%)</title><rect x="99.7456%" y="133" width="0.0254%" height="15" fill="rgb(224,113,18)" fg:x="15684" fg:w="4"/><text x="99.9956%" y="143.50"></text></g><g><title>alloc::raw_vec::finish_grow (3 samples, 0.02%)</title><rect x="99.7520%" y="117" width="0.0191%" height="15" fill="rgb(240,229,28)" fg:x="15685" fg:w="3"/><text x="100.0020%" y="127.50"></text></g><g><title>__GI___libc_realloc (3 samples, 0.02%)</title><rect x="99.7520%" y="101" width="0.0191%" height="15" fill="rgb(250,185,3)" fg:x="15685" fg:w="3"/><text x="100.0020%" y="111.50"></text></g><g><title>_int_realloc (3 samples, 0.02%)</title><rect x="99.7520%" y="85" width="0.0191%" height="15" fill="rgb(212,59,25)" fg:x="15685" fg:w="3"/><text x="100.0020%" y="95.50"></text></g><g><title>&lt;&amp;[T] as llm::tensor::TensorFromNested&gt;::flatten_and_shape (51 samples, 0.32%)</title><rect x="99.5485%" y="149" width="0.3243%" height="15" fill="rgb(221,87,20)" fg:x="15653" fg:w="51"/><text x="99.7985%" y="159.50"></text></g><g><title>malloc (16 samples, 0.10%)</title><rect x="99.7711%" y="133" width="0.1018%" height="15" fill="rgb(213,74,28)" fg:x="15688" fg:w="16"/><text x="100.0211%" y="143.50"></text></g><g><title>__memmove_avx_unaligned_erms (5 samples, 0.03%)</title><rect x="99.8792%" y="149" width="0.0318%" height="15" fill="rgb(224,132,34)" fg:x="15705" fg:w="5"/><text x="100.1292%" y="159.50"></text></g><g><title>__memmove_avx_unaligned_erms (3 samples, 0.02%)</title><rect x="99.9110%" y="85" width="0.0191%" height="15" fill="rgb(222,101,24)" fg:x="15710" fg:w="3"/><text x="100.1610%" y="95.50"></text></g><g><title>&lt;alloc::vec::Vec&lt;T&gt; as llm::tensor::TensorFromNested&gt;::flatten_and_shape (61 samples, 0.39%)</title><rect x="99.5485%" y="165" width="0.3879%" height="15" fill="rgb(254,142,4)" fg:x="15653" fg:w="61"/><text x="99.7985%" y="175.50"></text></g><g><title>alloc::raw_vec::RawVecInner&lt;A&gt;::reserve::do_reserve_and_handle (4 samples, 0.03%)</title><rect x="99.9110%" y="149" width="0.0254%" height="15" fill="rgb(230,229,49)" fg:x="15710" fg:w="4"/><text x="100.1610%" y="159.50"></text></g><g><title>alloc::raw_vec::finish_grow (4 samples, 0.03%)</title><rect x="99.9110%" y="133" width="0.0254%" height="15" fill="rgb(238,70,47)" fg:x="15710" fg:w="4"/><text x="100.1610%" y="143.50"></text></g><g><title>__GI___libc_realloc (4 samples, 0.03%)</title><rect x="99.9110%" y="117" width="0.0254%" height="15" fill="rgb(231,160,17)" fg:x="15710" fg:w="4"/><text x="100.1610%" y="127.50"></text></g><g><title>_int_realloc (4 samples, 0.03%)</title><rect x="99.9110%" y="101" width="0.0254%" height="15" fill="rgb(218,68,53)" fg:x="15710" fg:w="4"/><text x="100.1610%" y="111.50"></text></g><g><title>&lt;llm::tensor::Tensor as core::convert::From&lt;T&gt;&gt;::from (62 samples, 0.39%)</title><rect x="99.5485%" y="181" width="0.3943%" height="15" fill="rgb(236,111,10)" fg:x="15653" fg:w="62"/><text x="99.7985%" y="191.50"></text></g><g><title>__sincosf_fma (6 samples, 0.04%)</title><rect x="99.9428%" y="181" width="0.0382%" height="15" fill="rgb(224,34,41)" fg:x="15715" fg:w="6"/><text x="100.1928%" y="191.50"></text></g><g><title>&lt;llm::gemma3::Gemma3 as llm::modules::Module&gt;::forward (15,723 samples, 99.99%)</title><rect x="0.0000%" y="213" width="99.9936%" height="15" fill="rgb(241,118,19)" fg:x="0" fg:w="15723"/><text x="0.2500%" y="223.50">&lt;llm::gemma3::Gemma3 as llm::modules::Module&gt;::forward</text></g><g><title>llm::rope::Rope::new (70 samples, 0.45%)</title><rect x="99.5485%" y="197" width="0.4452%" height="15" fill="rgb(238,129,25)" fg:x="15653" fg:w="70"/><text x="99.7985%" y="207.50"></text></g><g><title>alloc::raw_vec::RawVecInner&lt;A&gt;::reserve::do_reserve_and_handle (2 samples, 0.01%)</title><rect x="99.9809%" y="181" width="0.0127%" height="15" fill="rgb(238,22,31)" fg:x="15721" fg:w="2"/><text x="100.2309%" y="191.50"></text></g><g><title>alloc::raw_vec::finish_grow (2 samples, 0.01%)</title><rect x="99.9809%" y="165" width="0.0127%" height="15" fill="rgb(222,174,48)" fg:x="15721" fg:w="2"/><text x="100.2309%" y="175.50"></text></g><g><title>__GI___libc_realloc (2 samples, 0.01%)</title><rect x="99.9809%" y="149" width="0.0127%" height="15" fill="rgb(206,152,40)" fg:x="15721" fg:w="2"/><text x="100.2309%" y="159.50"></text></g><g><title>_int_realloc (2 samples, 0.01%)</title><rect x="99.9809%" y="133" width="0.0127%" height="15" fill="rgb(218,99,54)" fg:x="15721" fg:w="2"/><text x="100.2309%" y="143.50"></text></g><g><title>_int_malloc (2 samples, 0.01%)</title><rect x="99.9809%" y="117" width="0.0127%" height="15" fill="rgb(220,174,26)" fg:x="15721" fg:w="2"/><text x="100.2309%" y="127.50"></text></g><g><title>all (15,724 samples, 100%)</title><rect x="0.0000%" y="437" width="100.0000%" height="15" fill="rgb(245,116,9)" fg:x="0" fg:w="15724"/><text x="0.2500%" y="447.50"></text></g><g><title>bench_modules-e (15,724 samples, 100.00%)</title><rect x="0.0000%" y="421" width="100.0000%" height="15" fill="rgb(209,72,35)" fg:x="0" fg:w="15724"/><text x="0.2500%" y="431.50">bench_modules-e</text></g><g><title>_start (15,724 samples, 100.00%)</title><rect x="0.0000%" y="405" width="100.0000%" height="15" fill="rgb(226,126,21)" fg:x="0" fg:w="15724"/><text x="0.2500%" y="415.50">_start</text></g><g><title>__libc_start_main_alias_1 (15,724 samples, 100.00%)</title><rect x="0.0000%" y="389" width="100.0000%" height="15" fill="rgb(227,192,1)" fg:x="0" fg:w="15724"/><text x="0.2500%" y="399.50">__libc_start_main_alias_1</text></g><g><title>__libc_start_call_main (15,724 samples, 100.00%)</title><rect x="0.0000%" y="373" width="100.0000%" height="15" fill="rgb(237,180,29)" fg:x="0" fg:w="15724"/><text x="0.2500%" y="383.50">__libc_start_call_main</text></g><g><title>main (15,724 samples, 100.00%)</title><rect x="0.0000%" y="357" width="100.0000%" height="15" fill="rgb(230,197,35)" fg:x="0" fg:w="15724"/><text x="0.2500%" y="367.50">main</text></g><g><title>std::rt::lang_start_internal (15,724 samples, 100.00%)</title><rect x="0.0000%" y="341" width="100.0000%" height="15" fill="rgb(246,193,31)" fg:x="0" fg:w="15724"/><text x="0.2500%" y="351.50">std::rt::lang_start_internal</text></g><g><title>std::rt::lang_start::{{closure}} (15,724 samples, 100.00%)</title><rect x="0.0000%" y="325" width="100.0000%" height="15" fill="rgb(241,36,4)" fg:x="0" fg:w="15724"/><text x="0.2500%" y="335.50">std::rt::lang_start::{{closure}}</text></g><g><title>std::sys::backtrace::__rust_begin_short_backtrace (15,724 samples, 100.00%)</title><rect x="0.0000%" y="309" width="100.0000%" height="15" fill="rgb(241,130,17)" fg:x="0" fg:w="15724"/><text x="0.2500%" y="319.50">std::sys::backtrace::__rust_begin_short_backtrace</text></g><g><title>bench_modules::main (15,724 samples, 100.00%)</title><rect x="0.0000%" y="293" width="100.0000%" height="15" fill="rgb(206,137,32)" fg:x="0" fg:w="15724"/><text x="0.2500%" y="303.50">bench_modules::main</text></g><g><title>criterion::benchmark_group::BenchmarkGroup&lt;M&gt;::bench_with_input (15,724 samples, 100.00%)</title><rect x="0.0000%" y="277" width="100.0000%" height="15" fill="rgb(237,228,51)" fg:x="0" fg:w="15724"/><text x="0.2500%" y="287.50">criterion::benchmark_group::BenchmarkGroup&lt;M&gt;::bench_with_input</text></g><g><title>criterion::routine::Routine::profile (15,724 samples, 100.00%)</title><rect x="0.0000%" y="261" width="100.0000%" height="15" fill="rgb(243,6,42)" fg:x="0" fg:w="15724"/><text x="0.2500%" y="271.50">criterion::routine::Routine::profile</text></g><g><title>&lt;criterion::routine::Function&lt;M,F,T&gt; as criterion::routine::Routine&lt;M,T&gt;&gt;::warm_up (15,724 samples, 100.00%)</title><rect x="0.0000%" y="245" width="100.0000%" height="15" fill="rgb(251,74,28)" fg:x="0" fg:w="15724"/><text x="0.2500%" y="255.50">&lt;criterion::routine::Function&lt;M,F,T&gt; as criterion::routine::Routine&lt;M,T&gt;&gt;::warm_up</text></g><g><title>criterion::bencher::Bencher&lt;M&gt;::iter (15,724 samples, 100.00%)</title><rect x="0.0000%" y="229" width="100.0000%" height="15" fill="rgb(218,20,49)" fg:x="0" fg:w="15724"/><text x="0.2500%" y="239.50">criterion::bencher::Bencher&lt;M&gt;::iter</text></g></svg></svg>
