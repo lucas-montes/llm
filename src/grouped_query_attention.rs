@@ -1,4 +1,8 @@
-use crate::{linear::Linear, modules::Module, tensor::Tensor};
+use crate::{
+    linear::Linear,
+    modules::Module,
+    tensor::{Tensor, TensorError},
+};
 
 use super::{rms_norm::RMSNorm, rope::Rope};
 
@@ -136,37 +140,34 @@ impl Module for GroupedQueryAttention {
         }
     }
 
-    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor {
+    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Result<Tensor, TensorError> {
         let mut dims = params.x.shape().dims().iter();
 
         let b = *dims.next().unwrap();
         let num_tokens = *dims.next().unwrap();
 
         // Apply projections
-        let mut queries = self.w_query.forward(&params.x);
-        let mut keys = self.w_key.forward(&params.x);
-        let values = self.w_value.forward(&params.x);
+        let mut queries = self.w_query.forward(&params.x)?;
+        let mut keys = self.w_key.forward(&params.x)?;
+        let values = self.w_value.forward(&params.x)?;
 
         queries = queries
-            .view(&[b, num_tokens, self.num_heads, self.head_dim])
-            .unwrap()
+            .view(&[b, num_tokens, self.num_heads, self.head_dim])?
             .transpose(1, 2);
         keys = keys
-            .view(&[b, num_tokens, self.num_kv_groups, self.head_dim])
-            .unwrap()
+            .view(&[b, num_tokens, self.num_kv_groups, self.head_dim])?
             .transpose(1, 2);
         let mut values = values
-            .view(&[b, num_tokens, self.num_kv_groups, self.head_dim])
-            .unwrap()
+            .view(&[b, num_tokens, self.num_kv_groups, self.head_dim])?
             .transpose(1, 2);
 
         // Optional normalization
         if let Some(norm) = self.q_norm.as_mut() {
-            queries = norm.forward(&queries);
+            queries = norm.forward(&queries)?;
         };
 
         if let Some(norm) = self.k_norm.as_mut() {
-            keys = norm.forward(&keys);
+            keys = norm.forward(&keys)?;
         };
 
         queries = params.rope.apply(&queries);
@@ -178,19 +179,15 @@ impl Module for GroupedQueryAttention {
 
         queries = &queries * self.scaling;
 
-        let mut attn_scores = queries.matmul(&keys.transpose(2, 3)).unwrap();
+        let mut attn_scores = queries.matmul(&keys.transpose(2, 3))?;
 
-        attn_scores = attn_scores
-            .masked_fill(&params.mask, -f32::INFINITY)
-            .unwrap();
+        attn_scores = attn_scores.masked_fill(&params.mask, -f32::INFINITY)?;
 
-        let attn_weights = attn_scores.softmax(-1).unwrap();
+        let attn_weights = attn_scores.softmax(-1)?;
 
-        let context = (attn_weights.matmul(&values))
-            .unwrap()
+        let context = (attn_weights.matmul(&values))?
             .transpose(1, 2)
-            .view(&[b, num_tokens, self.d_out])
-            .unwrap();
+            .view(&[b, num_tokens, self.d_out])?;
 
         self.out_proj.forward(&context)
     }

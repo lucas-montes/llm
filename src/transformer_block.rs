@@ -1,4 +1,4 @@
-use crate::{modules::Module, tensor::Tensor};
+use crate::{modules::Module, tensor::{Tensor, TensorError}};
 
 use super::{
     feed_forward::FeedForward, grouped_query_attention::GroupedQueryAttention, rms_norm::RMSNorm,
@@ -106,22 +106,22 @@ impl Module for TransformerBlock {
         }
     }
 
-    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor {
-        let input_layernorm = self.input_layernorm.forward(params.x);
+    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Result<Tensor, TensorError> {
+        let input_layernorm = self.input_layernorm.forward(params.x)?;
 
         let attn_params = super::grouped_query_attention::ForwardParams::new(
             &input_layernorm,
             params.mask,
             params.rope,
         );
-        let mut x_attn = self.att.forward(attn_params);
-        x_attn = self.post_attention_layernorm.forward(&x_attn);
+        let mut x_attn = self.att.forward(attn_params)?;
+        x_attn = self.post_attention_layernorm.forward(&x_attn)?;
 
-        let x = (&x_attn + params.x).unwrap();
+        let x = (&x_attn + params.x)?;
 
-        let mut x_ffn = self.pre_feedforward_layernorm.forward(&x);
-        x_ffn = self.ff.forward(&x_ffn);
-        x_ffn = self.post_feedforward_layernorm.forward(&x_ffn);
-        (&x_ffn + &x).unwrap()
+        let mut x_ffn = self.pre_feedforward_layernorm.forward(&x)?;
+        x_ffn = self.ff.forward(&x_ffn)?;
+        x_ffn = self.post_feedforward_layernorm.forward(&x_ffn)?;
+        &x_ffn + &x
     }
 }

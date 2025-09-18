@@ -1,4 +1,7 @@
-use crate::{modules::Module, tensor::Tensor};
+use crate::{
+    modules::Module,
+    tensor::{Tensor, TensorError},
+};
 
 pub struct RMSNorm {
     eps: f32,
@@ -36,14 +39,13 @@ impl Module for RMSNorm {
         }
     }
 
-    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor {
-        let var = params.powf(2.0).mean(None, false).unwrap();
-        let norm = (&(&var + self.eps).rsqrt() * params).unwrap();
+    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Result<Tensor, TensorError> {
+        let var = params.powf(2.0).mean(None, false)?;
+        let norm = (&(&var + self.eps).rsqrt() * params)?;
         let result = &norm * &(1.0 + &self.scale);
-        match (result, self.shift.as_ref()) {
-            (Ok(result), Some(shift)) => (&result + shift).unwrap(),
-            (Ok(result), None) => result,
-            (Err(e), _) => panic!("Error during forward pass: {}", e),
+        match self.shift.as_ref() {
+            Some(shift) => &result? + shift,
+            None => result,
         }
     }
 }

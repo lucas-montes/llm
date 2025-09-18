@@ -1,7 +1,7 @@
 use crate::{
     linear::Linear,
-    modules::{Module, gelu},
-    tensor::Tensor,
+    modules::{gelu, Module},
+    tensor::{Tensor, TensorError},
 };
 
 pub struct FeedForward {
@@ -64,11 +64,11 @@ impl Module for FeedForward {
         }
     }
 
-    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor {
-        let x1 = self.linear1.forward(params);
-        let x2 = self.linear2.forward(params);
+    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Result<Tensor, TensorError> {
+        let x1 = self.linear1.forward(params)?;
+        let x2 = self.linear2.forward(params)?;
 
-        let x3 = (&gelu(&x1, true).unwrap() * &x2).unwrap();
+        let x3 = (&gelu(&x1, true)? * &x2)?;
 
         self.linear3.forward(&x3)
     }

@@ -27,7 +27,7 @@ fn bench(c: &mut Criterion) {
             &indeces,
             |b, value| {
                 b.iter(|| {
-                    gemma.forward(black_box(value));
+                    let _ = gemma.forward(black_box(value)).unwrap();
                 });
             },
         );

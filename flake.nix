@@ -31,6 +31,7 @@
               venvShellHook
               torch
               tokenizers
+              numpy
               huggingface-hub
               safetensors
               sentencepiece

@@ -4,7 +4,7 @@ use crate::{
     modules::{AttentionType, Mask, Module},
     rms_norm::{self, RMSNorm},
     rope::Rope,
-    tensor::Tensor,
+    tensor::{Tensor, TensorError},
     transformer_block::TransformerBlock,
 };
 
@@ -144,10 +144,10 @@ impl Module for Gemma3 {
         }
     }
 
-    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor {
+    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Result<Tensor, TensorError> {
         let seq_len = params.len();
 
-        let mut x = &self.token_embeddings.forward(params) * (self.params.emb_dim as f32).powf(0.5);
+        let mut x = &self.token_embeddings.forward(params)? * (self.params.emb_dim as f32).powf(0.5);
         let create_block = || {
             crate::transformer_block::InitParams::new(
                 self.params.emb_dim,
@@ -182,10 +182,10 @@ impl Module for Gemma3 {
             };
             let mut block: TransformerBlock = create_block().into();
             let block_params = crate::transformer_block::ForwardParams::new(&x, mask, rope);
-            x = block.forward(block_params);
+            x = block.forward(block_params)?;
         }
 
-        x = self.final_norm.forward(&x);
+        x = self.final_norm.forward(&x)?;
         self.out_head.forward(&x)
     }
 }

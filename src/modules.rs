@@ -5,7 +5,7 @@ pub trait Module {
     type ForwardParams<'a>;
     fn init(params: Self::InitParams) -> Self;
     // Forward pass through the module, this is the main computation
-    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor;
+    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Result<Tensor, TensorError>;
 }
 
 const M_2_SQRTPI: f32 = 1.12837916709551257390;

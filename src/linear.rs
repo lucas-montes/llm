@@ -1,4 +1,4 @@
-use crate::{modules::Module, tensor::Tensor};
+use crate::{modules::Module, tensor::{Tensor, TensorError}};
 
 /// Applies an affine linear transformation to the incoming data: y=xAT+by=xA T+b.
 pub struct Linear {
@@ -43,14 +43,12 @@ impl Module for Linear {
         }
     }
 
-    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor {
+    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Result<Tensor, TensorError> {
         let result = params.matmul(&self.weight.transpose(0, 1));
-        let result = match (result, self.bias.as_ref()) {
-            (Ok(result), Some(b)) => &result + b,
-            (Ok(result), None) => Ok(result),
-            (Err(e), _) => panic!("Error during forward pass: {}", e),
-        };
-        result.unwrap()
+        match self.bias.as_ref() {
+            Some(b) => &result? + b,
+            None => result,
+        }
     }
 }
 
@@ -68,7 +66,7 @@ mod tests {
         };
         let mut linear = Linear::init(init_params);
         let input = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
-        let output = linear.forward(&input);
+        let output = linear.forward(&input).unwrap();
         assert_eq!(
             output.data(),
             &[
@@ -87,7 +85,7 @@ mod tests {
         };
         let mut linear = Linear::init(init_params);
         let input = Tensor::from([[1.0, 2.0], [3.0, 4.0]]);
-        let output = linear.forward(&input);
+        let output = linear.forward(&input).unwrap();
         assert_eq!(
             output.data(),
             &[

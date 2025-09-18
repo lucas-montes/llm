@@ -1,4 +1,4 @@
-use crate::{modules::Module, tensor::Tensor};
+use crate::{modules::Module, tensor::{Tensor, TensorError}};
 
 // https://github.com/pytorch/pytorch/blob/886699bc5c23105f6105d329f6ff6c0ada7b473c/torch/csrc/api/include/torch/nn/functional/embedding.h#L22
 pub struct Embedding {
@@ -43,7 +43,7 @@ impl Module for Embedding {
         }
     }
 
-    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Tensor {
+    fn forward<'a>(&mut self, params: Self::ForwardParams<'a>) -> Result<Tensor, TensorError> {
         // Calculate output size: each token becomes embedding_dim numbers
         let num_tokens = params.len();
         let total_elements = num_tokens * self.embedding_dim;
@@ -68,7 +68,7 @@ impl Module for Embedding {
             output_data.extend_from_slice(&data[start_idx..end_idx]);
         }
         // ALWAYS return with batch dimension: [1, seq_len, emb_dim] like pytorch
-        Tensor::new(&[1, num_tokens, self.embedding_dim], output_data)
+        Ok(Tensor::new(&[1, num_tokens, self.embedding_dim], output_data))
     }
 }
 
@@ -85,7 +85,7 @@ mod tests {
         let mut embedding: Embedding = InitParams::new(vocab_size, emb_dim, seed).into();
 
         let input_tokens = vec![0, 1, 2, 3, 4];
-        let output = embedding.forward(&input_tokens);
+        let output = embedding.forward(&input_tokens).unwrap();
 
         let expected = Tensor::new(
             &[1, 5, emb_dim],
